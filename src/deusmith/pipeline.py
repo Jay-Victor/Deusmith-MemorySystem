@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -227,6 +228,20 @@ class DeusmithMemory:
         session.last_node_id = node.id
 
     # ================================================================ 读取路径
+    def _keyword_terms(self, query: str) -> list[str]:
+        """关键词通道切词：CJK 二元组 + 拉丁词。
+        中文整句子串匹配几乎永远落空（无分词），二元组是最小可用粒度。"""
+        terms: set[str] = set()
+        for m in re.finditer(r"[A-Za-z0-9]+", query or ""):
+            terms.add(m.group(0).lower())
+        for m in re.finditer(r"[\u4e00-\u9fff]+", query or ""):
+            s = m.group(0)
+            if len(s) == 1:
+                terms.add(s)
+            for i in range(len(s) - 1):
+                terms.add(s[i:i + 2])
+        return sorted(terms)[:8]
+
     def retrieve(self, session: ShallowSession, query: str, topk: int = 8,
                  trace_id: str | None = None) -> RetrievalResult:
         now = utcnow()
@@ -243,19 +258,23 @@ class DeusmithMemory:
         graph_ids: set = set()
         graph_scores: dict[str, float] = {}
         if seed_ids:
-            graph_ids, edges = self.store.neighbors(self.scope, seed_ids,
-                                                    hops=rp.graph_hops)
+            graph_ids, edges = self.store.neighbors(
+                self.scope, seed_ids, hops=rp.graph_hops, max_expand=100)
             graph_scores = self._walk_scores(seed_ids, seed_sims, edges,
                                              rp.ppr_damping)
-        kw_hits = self.store.keyword_search(self.scope, query, limit=20,
-                                            allowed_sensitivity=self.allowed_sensitivity)
+        kw_rank: dict[str, int] = {}
+        for term in self._keyword_terms(query):
+            for n in self.store.keyword_search(self.scope, term, limit=10,
+                                               allowed_sensitivity=self.allowed_sensitivity):
+                if n.id not in kw_rank:
+                    kw_rank[n.id] = len(kw_rank) + 1
         recent = self.store.recent_active(self.scope, 20)
         resident = self.store.resident_nodes(self.scope)
 
         rankings = {
             "vector": vector_rank,
             "graph": sorted(graph_scores, key=graph_scores.get, reverse=True),
-            "keyword": [n.id for n in kw_hits],
+            "keyword": sorted(kw_rank, key=kw_rank.get),
             "recent": [n.id for n in recent],
             "explicit": [n.id for n in resident],
         }

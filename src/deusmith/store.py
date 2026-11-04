@@ -183,7 +183,9 @@ class InMemoryStore:
         out.sort(key=lambda n: n.last_access_at, reverse=True)
         return out[:limit]
 
-    def neighbors(self, scope, seed_ids, hops=2):
+    def neighbors(self, scope, seed_ids, hops=2, max_expand=None):
+        """BFS 扩展。max_expand 限制每跳新增节点数（稠密图必须有界，
+        否则子图边数线性爆炸，见 scripts/bench_pg.py 实测）。"""
         adj: dict[str, list[tuple[str, MemoryEdge]]] = {}
         for e in self._edges.values():
             if e.scope != scope or e.status == EdgeStatus.pruned:
@@ -377,31 +379,39 @@ class PostgresStore:
             rows = cur.fetchall()
         return [_row_to_node(r) for r in rows]
 
-    def neighbors(self, scope, seed_ids, hops=2):
+    def neighbors(self, scope, seed_ids, hops=2, max_expand=None):
+        """逐跳 BFS（每跳走 src/dst 部分索引），不用全表递归 CTE——实测递归 CTE
+        在 2 万边规模即 150–340ms（全表扫描）。
+        max_expand 限制每跳新增节点（稠密图必须有界：度 20 的 20 万边图上，
+        无界 2 跳会物化上万条子图边，实测 218ms；有界 100/跳 后几十毫秒）。
+        返回 (可达节点集, 子图内边)。"""
+        seen = set(seed_ids)
+        frontier = list(seed_ids)
+        for _ in range(max(0, hops)):
+            if not frontier:
+                break
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT src_id, dst_id FROM memory_edge "
+                    "WHERE scope=%s AND status <> 'pruned' "
+                    "AND (src_id = ANY(%s) OR dst_id = ANY(%s))",
+                    (scope, frontier, frontier))
+                rows = cur.fetchall()
+            nxt = set()
+            for r in rows:
+                nxt.update((r["src_id"], r["dst_id"]))
+            if max_expand is not None and len(nxt) > max_expand:
+                nxt = set(sorted(nxt)[:max_expand])   # 确定性截断
+            frontier = [nid for nid in nxt if nid not in seen]
+            seen |= nxt
+        ids = list(seen)
         with self.conn.cursor() as cur:
-            cur.execute("""
-                WITH RECURSIVE edge_both AS (
-                    SELECT src_id, dst_id FROM memory_edge
-                     WHERE scope=%s AND status <> 'pruned'
-                    UNION ALL
-                    SELECT dst_id, src_id FROM memory_edge
-                     WHERE scope=%s AND status <> 'pruned'
-                ),
-                walk AS (
-                    SELECT nid, 0 AS hop FROM unnest(%s::text[]) AS s(nid)
-                    UNION
-                    SELECT eb.dst_id, w.hop + 1 FROM edge_both eb
-                     JOIN walk w ON eb.src_id = w.nid WHERE w.hop < %s
-                )
-                SELECT DISTINCT ON (nid) nid FROM walk ORDER BY nid, hop
-            """, (scope, scope, list(seed_ids), hops))
-            ids = {r["nid"] for r in cur.fetchall()}
-            cur.execute("""
-                SELECT * FROM memory_edge WHERE scope=%s AND status <> 'pruned'
-                 AND src_id = ANY(%s) AND dst_id = ANY(%s)
-            """, (scope, list(ids), list(ids)))
-            edges = [_row_to_edge(r) for r in cur.fetchall()]
-        return ids, edges
+            cur.execute(
+                "SELECT * FROM memory_edge WHERE scope=%s AND status <> 'pruned' "
+                "AND src_id = ANY(%s) AND dst_id = ANY(%s)",
+                (scope, ids, ids))
+            rows = cur.fetchall()
+        return seen, [_row_to_edge(r) for r in rows]
 
     # ---- 边（合并语义由 trg_merge_edge 强制）
     def upsert_edge(self, e: MemoryEdge) -> bool:

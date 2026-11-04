@@ -12,8 +12,8 @@ from __future__ import annotations
 from datetime import datetime
 
 from .algos import (
-    cluster_nodes, decay_edge_weight, resolve_cycles, should_prune_edge,
-    tier_transition,
+    cluster_nodes, decay_edge_weight, estimate_confidence, resolve_cycles,
+    should_prune_edge, tier_transition,
 )
 from .models import EdgeStatus, MemoryNode, NodeStatus, NodeType, Tier, utcnow
 from .params import Params
@@ -89,13 +89,17 @@ class OfflineGovernor:
                 tier=Tier.middle, content_vector=self.embedder.embed(content or "摘要"),
                 embedding_model=self.embedder.model_name,
                 weight=max(m.weight for m in members),
-                confidence=max(m.confidence for m in members),
                 importance=max(m.importance for m in members),
                 emotion=max(m.emotion for m in members),
                 generation=max(m.generation for m in members) + 1,
                 evidence_refs=tuple(dict.fromkeys(
                     ref for m in members for ref in m.evidence_refs)),
             )
+            # 摘要的置信度按聚合证据数估计（8 条一致记录 → evidence_norm=1 → conf≈0.90），
+            # 而不是沿用成员默认值 0.5
+            summary.confidence = estimate_confidence(
+                summary, evidence_count=len(members), freshness=1.0,
+                params=self.params)
             from .models import EdgeType, MemoryEdge
             self.store.upsert_node(summary)
             for m in members:
