@@ -9,4 +9,5 @@ build/
 *.log
 data/
 logs/
+pg/
 .DS_Store

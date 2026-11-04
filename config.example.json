@@ -1,0 +1,26 @@
+{
+  "_说明": "复制为 config.json 使用；所有字段可省略走默认值（hash 嵌入 + 规则 LLM + PG 后端）",
+  "storage": {
+    "backend": "postgres",
+    "dsn": "postgresql://postgres@127.0.0.1:55433/deusmith",
+    "_dsn_env": "也可用环境变量 DEUSMITH_PG_DSN 覆盖"
+  },
+  "embedding": {
+    "provider": "hash",
+    "dim": 256,
+    "_provider_options": {
+      "hash": "零依赖离线默认（词法特征哈希，仅保证排序性）",
+      "openai": "OpenAI 兼容 /embeddings：需要 base_url/model，api_key 走 env DEUSMITH_EMBEDDING_API_KEY",
+      "local": "sentence-transformers 本地模型：需要 model_name，pip install deusmith-memory[local]"
+    }
+  },
+  "llm": {
+    "provider": "rule",
+    "_provider_options": {
+      "rule": "规则引擎（正则抽取/截断摘要/权威仲裁），离线保底",
+      "openai": "OpenAI 兼容 /chat/completions：需要 base_url/model，api_key 走 env DEUSMITH_LLM_API_KEY"
+    },
+    "base_url": "",
+    "model": ""
+  }
+}
