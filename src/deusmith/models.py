@@ -192,12 +192,15 @@ class MemoryEdge:
     last_reinforced_at: datetime = field(default_factory=utcnow)
     evidence_refs: tuple = ()
     status: EdgeStatus = EdgeStatus.active
+    scope: str = ""                     # 归属 scope（pipeline 填充；DB 层 CHECK 非空）
 
     def __post_init__(self):
         if not self.src_id or not self.dst_id:
             raise ValueError("src_id/dst_id 必填")
         if self.src_id == self.dst_id:
             raise ValueError("自环边不允许")
+        if not self.scope or not self.scope.strip():
+            raise ValueError("edge scope 必填（不变量 I1）")
         _check_unit(self.weight, "edge.weight")
         _check_unit(self.confidence, "edge.confidence")
         if isinstance(self.type, str):

@@ -287,7 +287,8 @@ class TestEdgeMath(unittest.TestCase):
     def test_contradicts_edge_weakened_not_deleted(self):
         """冲突边保留并降权（§五.4），status=weakened。"""
         from deusmith.algos import weaken_contradiction_edge
-        e = MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.contradicts, weight=0.8)
+        e = MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.contradicts,
+                       weight=0.8, scope="t0/u1")
         weaken_contradiction_edge(e)
         self.assertEqual(e.status.value, "weakened")
         self.assertLess(e.weight, 0.8)
@@ -342,10 +343,10 @@ class TestCycleResolution(unittest.TestCase):
     def test_tarjan_finds_cycle(self):
         from deusmith.algos import resolve_cycles
         edges = [
-            MemoryEdge(src_id="a", dst_id="b", type=EdgeType.derives_from),
-            MemoryEdge(src_id="b", dst_id="c", type=EdgeType.derives_from),
-            MemoryEdge(src_id="c", dst_id="a", type=EdgeType.derives_from),
-            MemoryEdge(src_id="d", dst_id="a", type=EdgeType.derives_from),
+            MemoryEdge(src_id="a", dst_id="b", type=EdgeType.derives_from, scope="t0/u1"),
+            MemoryEdge(src_id="b", dst_id="c", type=EdgeType.derives_from, scope="t0/u1"),
+            MemoryEdge(src_id="c", dst_id="a", type=EdgeType.derives_from, scope="t0/u1"),
+            MemoryEdge(src_id="d", dst_id="a", type=EdgeType.derives_from, scope="t0/u1"),
         ]
         actions = resolve_cycles(edges)
         removed = [e for e, act in actions if act == "remove"]

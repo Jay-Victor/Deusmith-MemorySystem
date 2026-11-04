@@ -136,7 +136,8 @@ class TestContradiction(unittest.TestCase):
 class TestMemoryEdgeValidation(unittest.TestCase):
     def test_edge_basics(self):
         from deusmith.models import EdgeType, MemoryEdge
-        e = MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.semantic_similar)
+        e = MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.semantic_similar,
+                       scope="t0/u1")
         self.assertTrue(e.edge_id)
         self.assertEqual(e.direction, "directed")
         self.assertEqual(e.weight, 0.5)
@@ -144,16 +145,23 @@ class TestMemoryEdgeValidation(unittest.TestCase):
     def test_self_loop_rejected(self):
         from deusmith.models import EdgeType, MemoryEdge
         with self.assertRaises(ValueError):
-            MemoryEdge(src_id="a" * 32, dst_id="a" * 32, type=EdgeType.co_occur)
+            MemoryEdge(src_id="a" * 32, dst_id="a" * 32, type=EdgeType.co_occur, scope="t0/u1")
+
+    def test_scope_required_invariant_i1(self):
+        from deusmith.models import EdgeType, MemoryEdge
+        with self.assertRaises(ValueError):
+            MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.co_occur, scope="")
 
     def test_weight_bounds(self):
         from deusmith.models import EdgeType, MemoryEdge
         with self.assertRaises(ValueError):
-            MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.co_occur, weight=1.5)
+            MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.co_occur,
+                       weight=1.5, scope="t0/u1")
 
     def test_contradicts_edge_is_bidirectional_marker(self):
         from deusmith.models import EdgeType, MemoryEdge
-        e = MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.contradicts)
+        e = MemoryEdge(src_id="a" * 32, dst_id="b" * 32, type=EdgeType.contradicts,
+                       scope="t0/u1")
         self.assertEqual(e.direction, "undirected")
 
 
