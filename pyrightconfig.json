@@ -1,0 +1,4 @@
+{
+  "extraPaths": ["src"],
+  "exclude": [".venv"]
+}
