@@ -33,6 +33,9 @@ _NEG_PREF = re.compile(
 _RESIDENCE = re.compile(r"我(?:现在)?(?:住在|位于|就职于|工作在)([\u4e00-\u9fffA-Za-z0-9]+)")
 _IDENTITY = re.compile(r"我(?:叫|是)([\u4e00-\u9fffA-Za-z0-9]{1,20})")
 _ALLERGY = re.compile(r"我对(.{1,12}?)过敏")
+_SLOT_FACT = re.compile(
+    r"([\u4e00-\u9fffA-Za-z0-9]{1,10})的([\u4e00-\u9fff]{1,8})是([\u4e00-\u9fffA-Za-z0-9]{1,20})"
+)
 _EXPLICIT = re.compile(r"^(?:请|帮我|麻烦)?(?:你)?记住[:：]?\s*")
 _POS_VERBS = {"喜欢", "爱", "偏爱", "钟爱"}
 _TRAILING = "了的地得啊吧呢哦呀，。, "
@@ -114,6 +117,15 @@ class RuleBasedLLM:
                 predicate="过敏", object_value=_strip_trailing(m.group(1)), polarity=0,
                 importance=0.8 + (0.1 if explicit else 0.0),
                 emotion=emotion, explicit_remember=explicit, sensitivity=2,
+            )
+        # 通用槽位事实：『X的Y是Z』（第三人称/复合主语的事实与身份类陈述）
+        m = _SLOT_FACT.search(sent)
+        if m:
+            return dict(
+                type="fact", content=sent, subject=m.group(1), predicate=m.group(2),
+                object_value=_strip_trailing(m.group(3)), polarity=0,
+                importance=0.6 + (0.2 if explicit else 0.0),
+                emotion=emotion, explicit_remember=explicit, sensitivity=1,
             )
         # 兜底：事件
         return dict(

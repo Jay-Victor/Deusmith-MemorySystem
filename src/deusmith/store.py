@@ -230,6 +230,10 @@ class InMemoryStore:
         return [e for e in self._edges.values()
                 if e.scope == scope and e.status != EdgeStatus.pruned]
 
+    def update_edge(self, e: MemoryEdge) -> None:
+        """强制替换（离线治理路径用，不触发饱和合并）。"""
+        self._edges[(e.src_id, e.dst_id, e.type)] = e
+
     # ---- 通道与治理查询
     def recent_active(self, scope, limit=20) -> list[MemoryNode]:
         out = [n for n in self._nodes.values()
@@ -428,6 +432,15 @@ class PostgresStore:
                         (scope,))
             rows = cur.fetchall()
         return [_row_to_edge(r) for r in rows]
+
+    def update_edge(self, e: MemoryEdge) -> None:
+        """强制更新（离线治理路径用；UPDATE 不经过 INSERT 合并触发器）。"""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "UPDATE memory_edge SET weight=%s, confidence=%s, status=%s, "
+                "last_reinforced_at=%s, evidence_refs=%s WHERE edge_id=%s",
+                (e.weight, e.confidence, e.status.value, e.last_reinforced_at,
+                 list(e.evidence_refs), e.edge_id))
 
     # ---- 通道与治理查询
     def recent_active(self, scope, limit=20) -> list[MemoryNode]:
