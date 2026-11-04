@@ -1,0 +1,75 @@
+# ============================================================================
+# Deusmith-MemorySystem · 参数表（docs/03）
+# 与 src/deusmith/params.py 默认值一一对应；scripts/check_params.py 校验
+# 一致性（漂移即失败）。数值来源：《Deusmith-Memory》§四 默认超参表 + 评审修正。
+#
+# tunable（可调维度，共 7 个，评审 §四）：
+#   [decay.tau_base_days] [score.exponents] [reinforce.etas] [score.mmr_lambda]
+#   [retrieval.recall] [tier.promotion] [tier.cluster_threshold]
+# 其余为结构常数——没有评估集之前不要动（<300 探针时 30 个自由参数必过拟合）。
+# ============================================================================
+
+# ---- 遗忘衰减（§五.1，Ebbinghaus 指数式；Act-R 幂律校准在演进路径）
+decay.tau_base_days: 7.0            # tunable[decay.tau_base_days]
+decay.k_importance: 0.8             # S 中 importance 系数
+decay.k_emotion: 0.5                # S 中 emotion 系数
+decay.k_confidence: 0.7             # S 中 confidence 系数
+decay.k_activation: 0.3             # S 中 ln(1+activation) 系数
+
+# ---- 强化（§五.2）
+reinforce.eta: 0.3                  # tunable[reinforce.etas] 节点强化学习率
+reinforce.eta_edge: 0.2            # 边强化学习率
+reinforce.lambda_edge_per_day: 0.01 # 边日衰减率
+
+# ---- 可信度（§五.5）权重和=1.2（sigmoid 组合，非 softmax 不必归一）
+confidence.w_source_auth: 0.35
+confidence.w_consistency: 0.25
+confidence.w_evidence: 0.2
+confidence.w_freshness: 0.1
+confidence.w_conflict_penalty: 0.3
+confidence.gain: 3.0                # 评审修正：无增益时 sigmoid 上限 0.711 < 晋升阈值 0.9
+
+# ---- 检索打分（§五.6）
+score.alpha: 1.0                    # tunable[score.exponents] rel 指数
+score.beta: 0.8                     # weight 指数
+score.gamma: 0.6                    # recency 指数
+score.delta: 1.0                    # confidence 指数
+score.epsilon: 0.5                  # importance 指数
+score.factor_floor: 0.01            # 每因子下限（I4 防零）
+score.mmr_lambda: 0.7               # tunable[score.mmr_lambda] MMR 相关性-多样性折衷
+score.min_score_threshold: 0.45     # 绝对下限：低于此视为"没记住"
+score.tier_boost.shallow: 0.8
+score.tier_boost.middle: 1.0
+score.tier_boost.deep: 1.15
+
+# ---- 召回与融合（§六.1/六.2）
+retrieval.topk_recall: 50           # tunable[retrieval.recall] 向量召回 K
+retrieval.graph_hops: 2             # 图游走跳数
+retrieval.ppr_damping: 0.85         # PPR 阻尼
+retrieval.knn_edge_topk: 20         # 写入即时建边候选数
+retrieval.token_budget: 4000        # 注入 Token 预算
+retrieval.rrf_k: 60                 # RRF 平滑常数
+retrieval.channel_weights.vector: 1.0
+retrieval.channel_weights.graph: 0.8
+retrieval.channel_weights.keyword: 0.6
+retrieval.channel_weights.recent: 0.5
+retrieval.channel_weights.explicit: 1.0
+
+# ---- 分层与流转（§二）
+tier.shallow_window_rounds: 10      # 最近 N 轮原文
+tier.shallow_context_share: 0.30    # 浅层 ≤ 上下文窗口 30%（I7）
+tier.shallow_cleanup_delay_min: 30.0
+tier.promote_mid_repeat: 2          # tunable[tier.promotion] 浅→中：跨会话重复
+tier.promote_mid_importance: 0.7    # 浅→中：importance 阈值
+tier.promote_deep_confidence: 0.9   # 中→深：confidence
+tier.promote_deep_source_auth: 0.8  # 中→深：source_auth
+tier.promote_deep_sessions: 5       # 中→深：跨会话数
+tier.middle_reference_ttl_days: 90  # 监控参考值；权威归档期限=导出公式 -τ_eff·ln(archive_score_floor)
+tier.archive_score_floor: 0.2       # θ_archive
+tier.archive_weight_floor: 0.2
+tier.edge_prune_weight: 0.1         # 剪枝三条件与门
+tier.edge_prune_days: 60
+tier.edge_prune_confidence: 0.3
+tier.cluster_threshold: 0.9         # tunable[tier.cluster_threshold] 压缩聚类阈值
+tier.max_summary_generation: 2      # 摘要级联深度上限
+tier.summary_max_tokens: 512

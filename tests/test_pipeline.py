@@ -210,8 +210,8 @@ class TestInjectPath(unittest.TestCase):
         s = m.session("s1")
         for topic in ("摄影", "跑步", "烹饪", "书法", "围棋", "滑雪", "钓鱼", "爬山"):
             m.write(s, f"我喜欢{topic}。")
-        out = m.inject_context(s, "用户的爱好", token_budget=120)
-        self.assertLessEqual(out["tokens"], 120)
+        out = m.inject_context(s, "用户的爱好", token_budget=45)
+        self.assertLessEqual(out["tokens"], 45)
         self.assertTrue(out["degraded"])                   # 超预算触发降级
 
     def test_session_context_in_user_segment(self):

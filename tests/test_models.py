@@ -126,6 +126,19 @@ class TestContradiction(unittest.TestCase):
         b = self._mk("u1", "讨厌", "跑步", +1, "我讨厌跑步")
         self.assertFalse(is_contradiction(a, b))  # 谓语不同：是两条记忆，不是冲突
 
+    def test_multi_valued_predicate_different_object_not_contradiction(self):
+        """多值谓语（喜欢）换宾语 = 两条并存偏好，不是冲突（错误#1 完整版）。"""
+        from deusmith.algos import is_contradiction
+        a = self._mk("u1", "喜欢", "摄影", +1, "我喜欢摄影")
+        b = self._mk("u1", "喜欢", "跑步", +1, "我喜欢跑步")
+        self.assertFalse(is_contradiction(a, b))
+
+    def test_multi_valued_opposite_polarity_different_object_not_contradiction(self):
+        from deusmith.algos import is_contradiction
+        a = self._mk("u1", "喜欢", "摄影", +1, "我喜欢摄影")
+        b = self._mk("u1", "喜欢", "跑步", -1, "我不喜欢跑步")
+        self.assertFalse(is_contradiction(a, b))  # 宾语不同：喜好对象都不同，无从冲突
+
     def test_identical_slot_and_value_is_duplicate(self):
         from deusmith.algos import is_duplicate
         a = self._mk("u1", "喜欢", "摄影", +1, "我喜欢摄影")

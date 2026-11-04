@@ -33,18 +33,28 @@ _PARAMS = Params()
 
 # ---------------------------------------------------------------- 槽位与冲突（不变量 I3）
 
+# 单值谓语：一个主体只能有一个宾语（换宾语=冲突）。多值谓语（喜欢/讨厌等）
+# 可以对多个宾语同时成立——「喜欢摄影」与「喜欢跑步」是两条记忆，不是冲突。
+_SINGLE_VALUED_PREDICATES = {
+    "住在", "位于", "就职于", "工作在", "叫", "是",
+    "核心价值观", "价值观", "名字", "生日", "血型", "国籍",
+}
+
+
 def is_contradiction(a: MemoryNode, b: MemoryNode) -> bool:
-    """冲突判定：槽位身份相同 + （极性相反 或 宾语不同）。
+    """冲突判定：槽位身份相同且（同宾语极性相反 ∨ 单值谓语换宾语）。
 
     语义相似度不参与判定——cos("我喜欢摄影","我不喜欢摄影了")≈0.95，
     相似度把否定当重复（评审错误#1）。无槽位节点返回 False（交给语义仲裁层）。
     """
     if a.slot_key() != b.slot_key() or a.subject is None:
         return False
-    if a.polarity != 0 and b.polarity != 0 and a.polarity != b.polarity:
-        return True
-    if a.object_value and b.object_value and a.object_value != b.object_value:
-        return True
+    same_obj = (a.object_value or None) == (b.object_value or None)
+    if same_obj and a.polarity != 0 and b.polarity != 0 and a.polarity != b.polarity:
+        return True   # 同宾语极性翻转：我喜欢摄影 ↔ 我不再喜欢摄影
+    if (a.object_value and b.object_value and a.object_value != b.object_value
+            and a.predicate in _SINGLE_VALUED_PREDICATES):
+        return True   # 单值谓语换宾语：住在上海 ↔ 住在北京
     return False
 
 

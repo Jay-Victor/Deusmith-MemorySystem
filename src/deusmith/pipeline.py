@@ -343,10 +343,15 @@ class DeusmithMemory:
                     and node.sensitivity <= self.allowed_sensitivity):
                 system_parts.append(node.content)
 
-        # user 段：按分数排序的相关记忆；争议只注入冲突提示
+        # user 段：按分数排序的相关记忆；争议只注入冲突提示（按槽位去重）
         user_parts: list[str] = []
+        hinted_slots: set = set()
         for node, score, _ in res.selected:
             if node.status == NodeStatus.contested:
+                key = (node.subject, node.predicate)
+                if key in hinted_slots:
+                    continue
+                hinted_slots.add(key)
                 topic = node.predicate or node.content[:12]
                 user_parts.append(f"[记忆冲突] 关于「{topic}」存在相互矛盾的记忆，需要用户确认")
                 continue
