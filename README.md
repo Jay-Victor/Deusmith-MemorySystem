@@ -100,6 +100,11 @@ report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run("tenant0/user1")
 `embedding.provider=openai|local`、`llm.provider=openai`，密钥走
 `DEUSMITH_EMBEDDING_API_KEY` / `DEUSMITH_LLM_API_KEY` 环境变量。
 
+本地语义模型（已验证路径）：`pip install sentence-transformers` 后配置
+`embedding.provider=local`、`model_name` 指向模型目录（如项目内
+`bge-small-zh-v1.5/`，bge 系需带 `query_prefix`）。实测
+bge-small-zh-v1.5 相比词法哈希：dev 查询探针 0.571 → 0.714（+14.3pp，见 docs/04 §I）。
+
 ## 阶段二能力（v0.2.0）
 
 - **连接池化**：`PostgresStore` 默认 psycopg_pool（1–8 连接），线程安全；未安装自动退回单连接。
@@ -111,7 +116,8 @@ report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run("tenant0/user1")
 - **抽取覆盖面**：中英文偏好/否定/居住/姓名/过敏/显式记住 + 通用槽位事实；英文 don't/can't 否定。
 - **权重防垄断**：离线治理对节点权重做惰性慢衰减（λ_w=0.002/天，floor 0.2）+ 基尼系数监控（>0.8 告警），防"富者愈富"。
 - **校准协议**：20 条查询探针 70/30 固定种子切分；`calibrate.py` 单维扫参 + held-out 终验（跑过即作废）。
-- **v0.2.1 检索通道修正（bge 实测驱动）**：时效因子有界弱化 `(1-ρ)+ρ·rec^γ`；recent 通道移出融合（连续性由浅层投影承担）；keyword 通道只收稀有 term（df<10）；常驻记忆单独成段注入。修正后语义增益显现：dev 探针 hash 0.500 → bge 0.643（+14.3pp）。
+- **v0.2.1 检索通道修正（bge 实测驱动）**：时效因子有界弱化 `(1-ρ)+ρ·rec^γ`；recent 通道移出融合（连续性由浅层投影承担）；keyword 通道只收稀有 term（df<10）；常驻记忆单独成段注入。修正后语义增益显现：dev 探针 hash 0.571 → bge 0.714（+14.3pp）。
+- **v0.2.2 校准闭环**：`calibrate.py --embed local` 四维扫参（mmr/gamma/beta/topk）——mmr 默认 0.7 恰在平台起点；gamma 呈单调梯度（0.3→0.786，门禁无退化）记为候选方向；按防过拟合协议默认全保持（dev=14 分辨率 ±7.1pp）。
 
 ```python
 # 可解释性示例

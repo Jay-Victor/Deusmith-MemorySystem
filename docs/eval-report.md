@@ -18,7 +18,7 @@
 
 ## 查询探针（70/30 切分，固定种子 42）
 
-- **dev（14 条，本报告口径）准确率：0.500（embedder=hash-128, split=dev）
+- **dev（14 条，本报告口径）准确率：0.571（embedder=hash-128, split=dev）
 - held-out：6 条，只应在发布前跑一次（`--heldout`；v0.2.0 基线见 docs/04）
 - ground truth 为期望子串出现在 top-3，独立于被测机制
 

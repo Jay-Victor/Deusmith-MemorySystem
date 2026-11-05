@@ -37,8 +37,8 @@ def apply_param(params: Params, dotted: str, value):
                    **{section: replace(getattr(params, section), **{key: value})})
 
 
-def accuracy(params: Params, probes) -> float:
-    mem, emb = ep.build_scenario(params=params)
+def accuracy(params: Params, probes, embedder) -> float:
+    mem, emb = ep.build_scenario(embedder=embedder, params=params)
     res = ep.run_query_probes(mem, emb, probes)
     return sum(1 for _, hit, _ in res if hit) / len(res)
 
@@ -47,13 +47,28 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--param", help="形如 score.mmr_lambda 的点号键")
     ap.add_argument("--values", help="逗号分隔候选值")
+    ap.add_argument("--embed", default="hash", choices=["hash", "local"],
+                    help="embedder：hash（离线默认）或 local（真实模型）")
+    ap.add_argument("--model", default="BAAI/bge-small-zh-v1.5",
+                    help="local 模式下的模型路径/ID")
     ap.add_argument("--final", action="store_true",
                     help="held-out 终验（跑过即作废）")
     args = ap.parse_args()
 
+    if args.embed == "local":
+        try:
+            from deusmith.embeddings import LocalModelEmbedding
+            emb = LocalModelEmbedding(
+                args.model,
+                query_prefix="为这个句子生成表示以用于检索相关文章：")
+        except ImportError as e:
+            raise SystemExit(f"[SKIP] 本地模型不可用：{e}")
+    else:
+        emb = None       # build_scenario 默认 hash
+
     base = Params()
     if args.final:
-        acc = accuracy(base, ep.HELDOUT_PROBES)
+        acc = accuracy(base, ep.HELDOUT_PROBES, emb)
         print(f"[held-out 终验] 默认参数准确率：{acc:.3f}"
               f"（{len(ep.HELDOUT_PROBES)} 条）")
         print("注意：held-out 跑过即被消费；下次发布前请重建探针集。")
@@ -68,16 +83,18 @@ def main() -> int:
     else:
         sweeps = DEFAULT_SWEEPS
 
-    base_acc = accuracy(base, ep.DEV_PROBES)
-    print(f"基线（默认参数，dev {len(ep.DEV_PROBES)} 条）：{base_acc:.3f}")
+    base_acc = accuracy(base, ep.DEV_PROBES, emb)
+    emb_label = emb.model_name if emb else "hash"
+    print(f"基线（默认参数，embedder={emb_label}，dev {len(ep.DEV_PROBES)} 条）：{base_acc:.3f}")
     for dotted, values in sweeps.items():
         print(f"\n== 扫参 {dotted} ==")
         for v in values:
-            acc = accuracy(apply_param(base, dotted, v), ep.DEV_PROBES)
+            acc = accuracy(apply_param(base, dotted, v), ep.DEV_PROBES, emb)
             delta = (acc - base_acc) * 100
             print(f"  {dotted}={v!s:>6} → dev 准确率 {acc:.3f}（{delta:+.1f}pp）")
     print("\n协议：选型后用 --final 在 held-out 上终验一次；跑过即作废。")
-    print("提醒：单维扫描默认值若无 >2pp 提升，保持默认——防过拟合到自造探针。")
+    print("提醒：dev=14 时 ±1 条探针 = ±7.1pp，小于 2 条的波动是噪声；"
+          "无多点一致提升（>2pp 且跨相邻值稳定）时保持默认——防过拟合。")
     return 0
 
 

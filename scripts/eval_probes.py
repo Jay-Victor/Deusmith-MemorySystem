@@ -69,10 +69,11 @@ OTHER_EVENTS = [
     ("用户上个月参加了行业峰会", 55), ("用户上周买了新键盘", 6),
 ]
 
-# 查询探针：(id, 查询, 期望 top-3 命中的子串) —— ground truth 独立于被测机制
+# 查询探针：(id, 查询, 期望 top-3 命中的子串；"|" 分隔=任一命中即算对) ——
+# ground truth 独立于被测机制。p02 为多目标（开放问题，任一"讨厌X"均为正确答案）。
 PROBE_SET = [
     ("p01", "用户的爱好有什么", "摄影"),
-    ("p02", "用户讨厌什么", "加班"),
+    ("p02", "用户讨厌什么", "加班|早起|嘈杂"),
     ("p03", "用户对什么过敏", "花粉"),
     ("p04", "用户现在住在哪里", "北京"),
     ("p05", "用户叫什么名字", "李雷"),
@@ -176,7 +177,7 @@ def run_query_probes(mem, emb, probes):
         # 评估模式关闭命中强化：探针测的是冷启动排序质量，不是先发优势滚雪球
         res = mem.retrieve(s, q, topk=5, reinforce_hits=False)
         tops = [n.content for n, _, _ in res.selected[:3]]
-        hit = any(expect in c for c in tops)
+        hit = any(any(e in c for e in expect.split("|")) for c in tops)
         results.append((pid, hit, f"top1={tops[0][:16] if tops else '∅'}"))
     return results
 

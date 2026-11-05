@@ -11,7 +11,13 @@
     "_provider_options": {
       "hash": "零依赖离线默认（词法特征哈希，仅保证排序性）",
       "openai": "OpenAI 兼容 /embeddings：需要 base_url/model，api_key 走 env DEUSMITH_EMBEDDING_API_KEY",
-      "local": "sentence-transformers 本地模型：需要 model_name，pip install deusmith-memory[local]"
+      "local": "sentence-transformers 本地模型：pip install deusmith-memory[local]"
+    },
+    "_local_example": {
+      "provider": "local",
+      "model_name": "E:/ALL_FOR_MY_PROJECTS/Deusmith/Deusmith-MemorySystem/bge-small-zh-v1.5",
+      "query_prefix": "为这个句子生成表示以用于检索相关文章：",
+      "_note": "model_name 支持本地目录路径或 HF 模型 ID；bge 系检索模型必须带 query_prefix"
     }
   },
   "llm": {
