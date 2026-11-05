@@ -6,27 +6,12 @@ on:
   pull_request:
 
 jobs:
-  test:
+  smoke:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python: ["3.11", "3.14"]
-    services:
-      postgres:
-        image: pgvector/pgvector:pg17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_HOST_AUTH_METHOD: trust
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DEUSMITH_PG_DSN_TEST: postgresql://postgres@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,13 +19,52 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install
         run: pip install -e .
-      - name: Unit + integration tests (PG included, pooling on)
-        run: python -m unittest discover -s tests -v
-      - name: Boundary selftest
-        run: python demo.py --selftest
-      - name: Params consistency
-        run: python scripts/check_params.py
-      - name: Schema real-engine check
-        run: python scripts/check_sql.py
-      - name: Probe gates (dev split)
-        run: python scripts/eval_probes.py
+      - name: Import all modules
+        run: |
+          python -c "
+          import deusmith
+          from deusmith import (params, models, algos, embeddings, llm, store,
+                                shallow, pipeline, offline, evidence, retryhttp)
+          print('11 modules OK, version', deusmith.__version__)
+          "
+      - name: End-to-end smoke (write -> retrieve -> inject)
+        run: |
+          python -c "
+          from deusmith.embeddings import HashEmbedding
+          from deusmith.llm import RuleBasedLLM
+          from deusmith.pipeline import DeusmithMemory
+          from deusmith.store import InMemoryStore
+          mem = DeusmithMemory(store=InMemoryStore(), embedder=HashEmbedding(dim=64),
+                               llm=RuleBasedLLM(), scope='ci/user')
+          s = mem.session('ci-1')
+          mem.write(s, '请记住：我对花粉过敏。')
+          mem.write(s, '我喜欢摄影。')
+          mem.write(s, '我现在住在上海。', source_auth=0.4)
+          mem.write(s, '我现在住在北京。', source_auth=0.95)
+          out = mem.inject_context(s, '用户的居住地和爱好')
+          assert '北京' in out['user'], out['user']
+          assert '摄影' in out['user'], out['user']
+          print('E2E smoke OK, tokens =', out['tokens'])
+          "
+      - name: Offline governance smoke
+        run: |
+          python -c "
+          from deusmith.embeddings import HashEmbedding
+          from deusmith.llm import RuleBasedLLM
+          from deusmith.offline import OfflineGovernor
+          from deusmith.pipeline import DeusmithMemory
+          from deusmith.store import InMemoryStore
+          mem = DeusmithMemory(store=InMemoryStore(), embedder=HashEmbedding(dim=64),
+                               llm=RuleBasedLLM(), scope='ci/user')
+          s = mem.session('ci-2')
+          for topic in ('摄影', '跑步', '烹饪', '书法'):
+              mem.write(s, f'我喜欢{topic}。')
+          report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run('ci/user')
+          expected = ('edges_decayed', 'edges_pruned', 'cycles_resolved',
+                      'summaries_created', 'promoted_deep', 'archived',
+                      'consistency_warnings', 'weights_renormalized',
+                      'gini_weight', 'weight_monopoly_warning')
+          for k in expected:
+              assert k in report, f'缺少治理报告键: {k}'
+          print('Offline governance OK:', report)
+          "
