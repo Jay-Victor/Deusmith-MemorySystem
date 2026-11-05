@@ -95,6 +95,11 @@ class RetrievalParams:
     knn_edge_topk: int = 20
     token_budget: int = 4000
     rrf_k: int = 60
+    # 精排（v0.3）：reranker 启用时，头部候选的 RRF rel 与 rerank 分数线性混合。
+    # rel' = (1-w)·rel_rrf + w·rerank_score——两者同为绝对刻度（与查询措辞无关），
+    # 同域可混合；w=0 纯 RRF，w=1 纯 rerank（多路召回只提供候选池）。
+    rerank_weight: float = 0.6
+    rerank_pool: int = 24           # 参与精排的候选上限（cross-encoder 代价 O(pool)）
     # 多路融合通道权重（向量/图/关键词/最近访问），和不必为 1（RRF 归一在分母）。
     # 常驻通道（explicit）不参与融合：常驻记忆无条件注入，不进相关性排序
     # （技能库 §4：常驻节点会在所有查询里排第一，挤掉真正相关的内容）。

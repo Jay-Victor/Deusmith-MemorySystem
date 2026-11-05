@@ -1,11 +1,14 @@
 # Deusmith-MemorySystem
 
 类人脑的智能体记忆管理数据库：**浅层工作记忆 / 中层情景语义记忆 / 深层核心记忆** 三层流转，
-pgvector 语义召回 + 图游走双路检索，证据驱动的可信度与冲突仲裁，写读分离 + 离线治理。
+pgvector 语义召回 + 图游走双路检索 + 可选 cross-encoder 精排，证据驱动的可信度与冲突仲裁，
+写读分离 + 离线治理，自带 CLI/REPL 控制台。
 
 - 后端：**PostgreSQL 17 + pgvector**（单库起步栈；psycopg_pool 连接池默认开启）
 - Embedding：本地模型（sentence-transformers / bge）/ OpenAI 兼容 API / 零依赖词法哈希 三选一
+- Rerank：本地 cross-encoder（bge-reranker 系）/ OpenAI 兼容 /rerank API / 默认关闭 三选一
 - LLM 挂钩：抽取/摘要/仲裁可用规则引擎离线跑（在线 LLM 失败自动降级），也可换 OpenAI 兼容 API
+- 控制台：`deusmith` 命令（CLI 一次性命令 + 交互 REPL，零第三方依赖）
 
 ## 安装
 
@@ -46,11 +49,28 @@ report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run("tenant0/user1")
 # 离线治理：边衰减/剪枝/环路消解/压缩合并/层级流转/权重防垄断(Gini)/一致性审计
 ```
 
+## 控制台（CLI / REPL）
+
+```bash
+pip install -e .            # 提供 deusmith 入口点（也可 python -m deusmith.console）
+
+deusmith                    # 交互 REPL（无 config.json 时内存模式，零依赖可跑）
+deusmith --memory write "请记住：我对花粉过敏。"      # 一次性命令
+deusmith --scope tenant0/user1 search "过敏" -k 5    # PG 后端跨进程检索
+deusmith --smoke            # 自检（CI 用）
+```
+
+REPL 命令：`write` 写入 → `search` 检索（得分/rel/精排明细）→ `inject` 上下文注入
+→ `tiers` 三层分布 → `node/slot/why/explain` 全参数与可解释性 → `stats` 基尼与事件
+→ `forget <id>` 单条遗忘曲线与归档期限 → `govern` 离线治理 → `config` 生效配置。
+配置文件：`--config` / `$DEUSMITH_CONFIG` / `./config.json`（模板 `config.example.json`）。
+
 ## 能力一览
 
 - **三层记忆**：浅层会话（滚动窗口+摘要，PG 持久化、重启恢复）→ 中层情景语义
   （pgvector HNSW + 边表图 + 时序版本链）→ 深层核心（版本链+审计，只可废止不可篡改）。
-- **双路检索**：HNSW 向量 + 有界 2 跳图游走 + 稀有词关键词通道，RRF 绝对刻度融合，
+- **双路检索 + 可选精排**：HNSW 向量 + 有界 2 跳图游走 + 稀有词关键词通道，RRF 绝对刻度融合，
+  可选 cross-encoder/API 精排（`rel' = (1-w)·rel_rrf + w·rerank_score`，失败自动降级回 RRF），
   MMR 多样性裁剪；常驻记忆单独成段注入，不挤占相关性排序。
 - **冲突仲裁**：槽位身份 + 极性判定（否定句不会被相似度去重吞掉）；高权威纠正走
   supersedes 版本链 + 双时间窗口（valid_from/valid_to）；深层记忆永不静默覆盖。
@@ -74,21 +94,23 @@ report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run("tenant0/user1")
 - **图游走必须有界**：度 20 的 20 万边图上，无界 2 跳 214ms vs 有界（100/跳）10ms。
 - **TTL 是导出量**：归档期限 = −τ_eff·ln(θ)，与连续衰减不双轨并存。
 
-## 换真实嵌入/LLM
+## 换真实嵌入/LLM/重排
 
 复制 `config.example.json` 为 `config.json`：`embedding.provider = openai | local`、
-`llm.provider = openai`，密钥走 `DEUSMITH_EMBEDDING_API_KEY` / `DEUSMITH_LLM_API_KEY`
+`rerank.provider = local | openai`、`llm.provider = openai`，密钥走
+`DEUSMITH_EMBEDDING_API_KEY` / `DEUSMITH_RERANK_API_KEY` / `DEUSMITH_LLM_API_KEY`
 环境变量。本地 bge 模型：`model_name` 指向模型目录（bge 系需带 `query_prefix`），实测
-bge-small-zh-v1.5 相比词法哈希 dev 查询探针 0.571 → 0.714（+14.3pp）。
+bge-small-zh-v1.5 相比词法哈希 dev 查询探针 0.571 → 0.714（+14.3pp）。重排模型同样
+用户自行下载（如 `BAAI/bge-reranker-base`），默认关闭不影响既有检索行为。
 
 ## 项目结构
 
 ```
 Deusmith-MemorySystem/
-├── src/deusmith/     核心实现：params models algos embeddings llm store
-│                     shallow pipeline offline evidence retryhttp + schema.sql
+├── src/deusmith/     核心实现：params models algos embeddings rerank llm store
+│                     shallow pipeline offline evidence retryhttp console + schema.sql
 ├── config.example.json
-├── pyproject.toml
+├── pyproject.toml    # deusmith = deusmith.console:main 入口点
 └── README.md
 ```
 

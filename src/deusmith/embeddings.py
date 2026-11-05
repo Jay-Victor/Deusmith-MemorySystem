@@ -166,7 +166,10 @@ class LocalModelEmbedding:
                     "local provider 需要 sentence-transformers："
                     "pip install sentence-transformers") from e
             self._model = SentenceTransformer(self._model_name)
-            self.dim = self._model.get_sentence_embedding_dimension()
+            # sentence-transformers ≥6 改名 get_embedding_dimension，旧版兼容
+            get_dim = (getattr(self._model, "get_embedding_dimension", None)
+                       or self._model.get_sentence_embedding_dimension)
+            self.dim = get_dim()
         return self._model
 
     def embed(self, text: str) -> tuple:

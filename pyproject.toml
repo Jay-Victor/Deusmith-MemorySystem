@@ -15,6 +15,9 @@ dependencies = [
 local = ["sentence-transformers>=2.7"]
 dev = []
 
+[project.scripts]
+deusmith = "deusmith.console:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

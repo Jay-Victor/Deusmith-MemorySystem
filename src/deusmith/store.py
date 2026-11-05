@@ -14,14 +14,19 @@ from __future__ import annotations
 import json
 import os
 from collections import deque
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from .algos import cosine
 from .models import (
     EdgeStatus, EdgeType, MemoryEdge, MemoryNode, NodeStatus, NodeType, Tier,
 )
+
+if TYPE_CHECKING:
+    import psycopg
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 DEFAULT_DSN = "postgresql://postgres@127.0.0.1:55433/deusmith"
@@ -336,6 +341,15 @@ class InMemoryStore:
         edges = [e for e in self._edges.values() if e.scope == scope]
         return {"nodes_total": len(nodes), "edges_total": len(edges)}
 
+    def tier_stats(self, scope) -> dict:
+        """(tier, status) → 节点数（控制台分层统计用）。"""
+        out: dict = {}
+        for n in self._nodes.values():
+            if n.scope == scope:
+                key = (n.tier.value, n.status.value)
+                out[key] = out.get(key, 0) + 1
+        return out
+
 
 class PostgresStore:
     """PostgreSQL 17 + pgvector 真后端（psycopg3 + psycopg_pool 连接池）。
@@ -372,12 +386,15 @@ class PostgresStore:
                                         row_factory=dict_row, connect_timeout=10)
 
     @contextmanager
-    def cursor(self):
-        """统一游标入口：池模式每调用独占一条连接（线程安全）。"""
+    def cursor(self) -> "Iterator[psycopg.Cursor[dict]]":
+        """统一游标入口：池模式每调用独占一条连接（线程安全）。
+
+        行类型恒为 dict（两条连接分支均 row_factory=dict_row；
+        psycopg_pool 的泛型默认未反映 kwargs，运行时以 cast 明示）。"""
         if self._pool is not None:
             with self._pool.connection() as conn:
                 with conn.cursor() as cur:
-                    yield cur
+                    yield cast("psycopg.Cursor[dict]", cur)
         else:
             with self.conn.cursor() as cur:
                 yield cur
@@ -684,6 +701,15 @@ class PostgresStore:
             cur.execute("SELECT count(*) AS c FROM memory_edge WHERE scope=%s", (scope,))
             edges = cur.fetchone()["c"]
         return {"nodes_total": nodes, "edges_total": edges}
+
+    def tier_stats(self, scope) -> dict:
+        """(tier, status) → 节点数（控制台分层统计用）。"""
+        with self.cursor() as cur:
+            cur.execute(
+                "SELECT tier, status, count(*) AS c FROM memory_node "
+                "WHERE scope=%s GROUP BY tier, status", (scope,))
+            rows = cur.fetchall()
+        return {(r["tier"], r["status"]): int(r["c"]) for r in rows}
 
     # ---- 深层专用
     def deprecate_deep(self, node_id: str, reason: str, actor: str = "system") -> None:

@@ -20,6 +20,26 @@
       "_note": "model_name 支持本地目录路径或 HF 模型 ID；bge 系检索模型必须带 query_prefix"
     }
   },
+  "rerank": {
+    "provider": "none",
+    "_provider_options": {
+      "none": "默认关闭：检索只走 RRF 多路融合（行为与历史版本一致）",
+      "local": "本地 cross-encoder 重排：pip install deusmith-memory[local] 并自行下载模型（如 BAAI/bge-reranker-base），model_name 支持目录或 HF ID",
+      "openai": "OpenAI 兼容 /rerank API（Jina/Cohere/SiliconFlow 风格），api_key 走 env DEUSMITH_RERANK_API_KEY"
+    },
+    "_local_example": {
+      "provider": "local",
+      "model_name": "BAAI/bge-reranker-base",
+      "batch_size": 16,
+      "max_length": 512,
+      "_note": "召回-融合之后、MMR 之前精排：rel' = (1-w)·rel_rrf + w·rerank_score（w 走 params.retrieval.rerank_weight，默认 0.6）；失败自动降级回 RRF 并记 rerank_fallback 事件"
+    },
+    "_openai_example": {
+      "provider": "openai",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "model": "BAAI/bge-reranker-v2-m3"
+    }
+  },
   "llm": {
     "provider": "rule",
     "_provider_options": {

@@ -50,7 +50,7 @@ class DeusmithMemory:
 
     def __init__(self, store, embedder, llm=None, params: Params | None = None,
                  scope: str = "default/user", allowed_sensitivity: int = 2,
-                 evidence_store=None):
+                 evidence_store=None, reranker=None):
         if not scope or not scope.strip():
             raise ValueError("scope 必填（不变量 I1）")
         self.store = store
@@ -61,6 +61,7 @@ class DeusmithMemory:
         self.scope = scope
         self.allowed_sensitivity = allowed_sensitivity
         self.evidence_store = evidence_store
+        self.reranker = reranker                 # None → 精排关闭（默认，零开销）
         self._sessions: dict[str, ShallowSession] = {}
 
     # ================================================================ 会话
@@ -362,6 +363,11 @@ class DeusmithMemory:
             scored.append((node, score, rel))
         scored.sort(key=lambda x: x[1], reverse=True)
 
+        # ---- 精排（可选 reranker：cross-encoder / API；失败降级回 RRF 排序）
+        rerank_info: dict | None = None
+        if self.reranker is not None:
+            scored, rerank_info = self._apply_rerank(query, scored, now, trace_id)
+
         # ---- MMR 多样性裁剪（§六.2）
         pool = [(n.id, s, n.content_vector) for n, s, _ in scored[: max(topk * 3, 12)]]
         picked = mmr_select(pool, k=topk, lam=self.params.score.mmr_lambda)
@@ -386,9 +392,57 @@ class DeusmithMemory:
             "conflict_flags": conflict_flags,
             "filtered_reasons": filtered_reasons[:10],
         }
+        if rerank_info:
+            trace["rerank"] = rerank_info
         self.store.log_event("retrieval", trace, trace_id=trace_id, scope=self.scope)
         return RetrievalResult(selected=selected, filtered_reasons=filtered_reasons,
                                conflict_flags=conflict_flags, trace=trace)
+
+    def _apply_rerank(self, query: str, scored: list, now: datetime,
+                      trace_id: str | None):
+        """精排：rel' = (1-w)·rel_rrf + w·rerank_score（v0.3，§六.1 读取路径）。
+
+        - 只精排头部 rerank_pool 条（cross-encoder 代价 O(pool)），尾部不动；
+        - rerank 分数缺失的条目保持原 rel（分批 API 部分失败不炸整轮检索）；
+        - 任何异常（网络/模型加载）降级回 RRF 排序，记 rerank_fallback 事件
+          （与 LLM 失败降级同语义，评审 #6）；
+        - 两者同为绝对刻度（不变量 I4 域内）：混合值仍与查询措辞无关，
+          min_score_threshold 等绝对阈值继续可移植。
+        """
+        rp = self.params.retrieval
+        if self.reranker is None:            # 独立调用守卫（类型收窄）
+            return scored, None
+        pool = scored[: max(1, int(rp.rerank_pool))]
+        try:
+            rscores = self.reranker.rerank(query, [n.content for n, _, _ in pool])
+        except Exception as exc:
+            self.store.log_event("rerank_fallback", {"error": str(exc)[:200]},
+                                 trace_id=trace_id, scope=self.scope)
+            return scored, {"used": False, "error": str(exc)[:120]}
+        if not rscores:
+            return scored, None     # IdentityReranker：不参与精排，零痕迹
+
+        w = min(1.0, max(0.0, rp.rerank_weight))
+        blended: list = []
+        for i, (node, _old_score, rel) in enumerate(pool):
+            rs = rscores[i] if i < len(rscores) else None
+            if rs is None:
+                blended.append((node, _old_score, rel))
+                continue
+            new_rel = (1.0 - w) * rel + w * float(rs)
+            new_score = retrieval_score(new_rel, node, now,
+                                        self.allowed_sensitivity, self.params)
+            blended.append((node, new_score, new_rel))
+        out = blended + scored[len(pool):]
+        out.sort(key=lambda x: x[1], reverse=True)
+        info = {
+            "used": True, "model": getattr(self.reranker, "model_name", "?"),
+            "pool": len(pool), "weight": w,
+            "rerank_scores": {n.id: round(float(s), 4)
+                              for (n, _, _), s in zip(pool, rscores)
+                              if s is not None},
+        }
+        return out, info
 
     def _walk_scores(self, seed_ids, seed_sims, edges, damping: float) -> dict:
         """图游走评分（PPR 简化版）：score = max over paths damping^hop·Πw。"""

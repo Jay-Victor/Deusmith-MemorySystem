@@ -24,9 +24,13 @@ jobs:
           python -c "
           import deusmith
           from deusmith import (params, models, algos, embeddings, llm, store,
-                                shallow, pipeline, offline, evidence, retryhttp)
-          print('11 modules OK, version', deusmith.__version__)
+                                shallow, pipeline, offline, evidence, retryhttp,
+                                rerank, console)
+          print('13 modules OK, version', deusmith.__version__)
           "
+      - name: Console smoke (REPL commands + rerank blend/fallback)
+        run: |
+          python -m deusmith.console --smoke
       - name: End-to-end smoke (write -> retrieve -> inject)
         run: |
           python -c "
