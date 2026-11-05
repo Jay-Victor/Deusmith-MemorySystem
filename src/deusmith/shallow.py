@@ -35,6 +35,7 @@ class ShallowSession:
         self.params = params
         self.llm = llm
         self.rounds: deque[Round] = deque(maxlen=params.tier.shallow_window_rounds)
+        self._unpersisted: list[Round] = []   # 待落库轮次（save_session 消费）
         self.tool_results: deque[str] = deque(maxlen=20)
         self.rolling_summary: str = ""
         self.last_node_id: str | None = None      # 本会话最近写入的节点（temporal_next 用）
@@ -45,8 +46,16 @@ class ShallowSession:
 
     # ---- 写入
     def add_round(self, role: str, content: str) -> None:
-        self.rounds.append(Round(role=role, content=content))
+        r = Round(role=role, content=content)
+        self.rounds.append(r)
+        self._unpersisted.append(r)
         self.last_active_at = utcnow()
+
+    def take_unpersisted(self) -> list[Round]:
+        """取走待持久化轮次（存储层 save_session 消费，幂等）。"""
+        out = self._unpersisted
+        self._unpersisted = []
+        return out
 
     def add_tool_result(self, content: str) -> None:
         self.tool_results.append(content)

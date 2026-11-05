@@ -153,3 +153,22 @@ summary_of 边、原文归档；摘要置信度按聚合证据数估计）→ �
 | 一 | PG+pgvector 存储、节点/边 Schema、向量检索与注入 | ✅ 完成+实测 |
 | 二 | 衰减强化、可信度、冲突仲裁、图游走与 MMR | ✅ 完成+实测（图库以 PG 边表替代，见演进触发） |
 | 三 | 离线压缩合并、层级流转、深层版本审计、可观测性、评估闭环 | ✅ 完成（评估闭环含七类门禁） |
+
+## 13. 阶段二新增（v0.2.0）
+
+| 能力 | 实现 | 验证 |
+|---|---|---|
+| 连接池化（评审 #4） | `PostgresStore(use_pool=True)`：psycopg_pool min1/max8，线程安全；未装自动退回单连接 | 8 线程并发检索集成测试 |
+| 浅层会话持久化（#5） | `shallow_session`/`shallow_round` 表（复合主键 scope+session_id，FK 级联）；`session()` 自动恢复；全量轮次落库、内存窗口 10 | InMemory + PG 往返测试 |
+| API 硬化（#6） | `retryhttp.post_json_with_retry`（5xx/429/网络错误指数退避）；`embed_batch` 按 64 分批；stats 成本计数；pipeline 写入 LLM 失败自动降级规则引擎（`llm_fallback` 事件留痕） | 本地 mock 服务器协议级测试 |
+| 双时间接线（#7） | supersede 写 `old.valid_to=now, new.valid_from=now`；`slot_history()` 时序历史查询；过期记忆检索降权 ×0.5 | 单测 + PG 集成 |
+| 证据写入器（#8） | `evidence.LocalEvidenceStore`（本地目录 sha256 内容寻址，同内容去重，verify 防篡改）+ `record_evidence` 表行 | 单测 + PG 集成 |
+| 可解释性（#9） | `explain_injection(trace_id)` / `why_selected(node_id)` / `explain_score(node_id)`（因子分解+上限分）/ `slot_history` | 单测 + PG 集成 |
+| 抽取覆盖面（#1 梯队 #2） | 英文 like/hate/negation/live in/name/allergic/remember；中文扩 擅长/害怕/介意/支持/反对/热衷 + 否定 不/没/别/无/停止/从不；句点切分（小数不切） | 10 个新抽取测试 |
+| 校准基础设施（#3） | 20 条查询探针固定种子 70/30 切分；`calibrate.py` 单维扫参框架 + held-out 终验协议 | dev 0.214 / held-out 0.500 基线 |
+| CI（#10） | GitHub Actions：pgvector/pgvector:pg17 服务容器，py3.11+3.14 矩阵跑全量（含 PG 集成、check_sql、探针门禁） | 推送后首跑见 Actions 页 |
+| 权重防垄断（设计隐忧） | 离线治理新增：节点权重惰性慢衰减 λ_w=0.002/天（半衰期≈347 天，floor 0.2）+ Gini 监控（>0.8 审计告警）；recency 快时钟管新鲜度、λ_w 慢时钟管强化历史，双时钟分工 | 单测：闲置 400 天衰减、每周检索均衡态>0.75、垄断告警 |
+
+**新失效模式（本阶段实测抓到并修复）**：图通道的边不过滤对端节点状态——被
+supersede 的旧版本可经 contradicts 边回到候选池重新参选（"上海"压过"北京"）。
+修复：候选收集统一加状态门控（active/contested）。这条已入技能库。

@@ -10,26 +10,37 @@
   - arbitrate 对深层记忆只返回 contested（不允许静默覆盖深层记忆），
     深层变更必须走人工确认 + 版本链 + 审计；
   - extract 的否定词处理是错误#1 的写入侧防线：『不再喜欢』必须产出 polarity=-1。
+
+RuleBasedLLM 覆盖面（阶段二扩充）：
+  中文：喜欢/讨厌/爱/恨/偏爱/钟爱/擅长/害怕/介意/支持/反对/热衷 + 否定
+  （不再/不/没/别/无/停止/从不）；住在/位于/就职于；我叫/我是；过敏；
+  『X的Y是Z』通用槽位事实。
+  英文：like/love/enjoy/prefer/hate/dislike/can't stand（含 don't 否定）、
+  live in、my name is、allergic to、please remember that。
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import urllib.request
 
 from .algos import estimate_tokens
 from .models import MemoryNode
+from .retryhttp import post_json_with_retry
 
-_SENT_SPLIT = re.compile(r"[。！？；;\n]+")
+# 句边界：中文标点 + 换行；ASCII 句点仅在后随空白/行尾时切分（小数 3.5 不切）。
+_SENT_SPLIT = re.compile(r"[。！？；;\n]+|\.(?:\s+|$)")
 _EMOTION_WORDS = {
     "开心": 0.8, "高兴": 0.8, "兴奋": 0.9, "激动": 0.8, "满意": 0.6,
     "难过": 0.8, "伤心": 0.8, "生气": 0.9, "愤怒": 0.9, "沮丧": 0.7,
     "焦虑": 0.7, "害怕": 0.7, "累": 0.4, "烦": 0.6,
 }
 _NEG_PREF = re.compile(
-    r"我(?:现在)?(?:不再|不|很|特别|比较|有点|超)?(喜欢|讨厌|爱|恨|偏爱|钟爱)([\u4e00-\u9fffA-Za-z0-9]+)"
+    r"我(?:现在|平时|一般)?(?:不再|不|很|特别|比较|有点|超|从不|没|别|无|停止)?"
+    r"(喜欢|讨厌|爱|恨|偏爱|钟爱|擅长|害怕|介意|支持|反对|热衷)"
+    r"([\u4e00-\u9fffA-Za-z0-9]+)"
 )
+_NEG_WORDS = re.compile(r"(不再|不|没|别|无|停止|从不)")
 _RESIDENCE = re.compile(r"我(?:现在)?(?:住在|位于|就职于|工作在)([\u4e00-\u9fffA-Za-z0-9]+)")
 _IDENTITY = re.compile(r"我(?:叫|是)([\u4e00-\u9fffA-Za-z0-9]{1,20})")
 _ALLERGY = re.compile(r"我对(.{1,12}?)过敏")
@@ -37,7 +48,27 @@ _SLOT_FACT = re.compile(
     r"([\u4e00-\u9fffA-Za-z0-9]{1,10})的([\u4e00-\u9fff]{1,8})是([\u4e00-\u9fffA-Za-z0-9]{1,20})"
 )
 _EXPLICIT = re.compile(r"^(?:请|帮我|麻烦)?(?:你)?记住[:：]?\s*")
-_POS_VERBS = {"喜欢", "爱", "偏爱", "钟爱"}
+
+# ---- 英文模式（阶段二 #2）
+_EN_PREF = re.compile(
+    r"\b[Ii]\s+(?:(?:really|kind\s+of|sort\s+of)\s+)?"
+    r"(don'?t\s+(?:like|love|enjoy)|do\s+not\s+(?:like|love|enjoy)|"
+    r"can'?t\s+stand|like|love|enjoy|prefer|hate|dislike)\s+"
+    r"([A-Za-z0-9][A-Za-z0-9 .'\-]{0,40}?)(?=[.,!?\n]|$)"
+)
+_EN_PREF_MAP = {
+    "like": ("喜欢", 1), "love": ("喜欢", 1), "enjoy": ("喜欢", 1),
+    "prefer": ("偏爱", 1), "hate": ("讨厌", -1), "dislike": ("讨厌", -1),
+}
+_EN_LIVE = re.compile(
+    r"\b[Ii]\s+(?:currently\s+)?live\s+in\s+([A-Za-z][A-Za-z .'\-]{0,40}?)(?=[.,!?\n]|$)")
+_EN_NAME = re.compile(
+    r"\b[Mm]y\s+name\s+is\s+([A-Za-z][A-Za-z .'\-]{0,30}?)(?=[.,!?\n]|$)")
+_EN_ALLERGY = re.compile(
+    r"\b[Ii](?:'m| am)?\s+allergic\s+to\s+([A-Za-z][A-Za-z .'\-]{0,40}?)(?=[.,!?\n]|$)")
+_EN_REMEMBER = re.compile(r"^\s*(?:please\s+)?remember\s+(?:that\s+)?", re.I)
+
+_POS_VERBS = {"喜欢", "爱", "偏爱", "钟爱", "擅长", "热衷"}
 _TRAILING = "了的地得啊吧呢哦呀，。, "
 
 
@@ -54,7 +85,7 @@ def _emotion_of(sentence: str) -> float:
 
 
 class RuleBasedLLM:
-    """规则引擎：中文优先的正则抽取 + 截断式摘要 + 权威/置信仲裁。全离线、确定性。"""
+    """规则引擎：中英文优先的正则抽取 + 截断式摘要 + 权威/置信仲裁。全离线、确定性。"""
 
     def extract(self, text: str) -> list[dict]:
         items: list[dict] = []
@@ -67,8 +98,12 @@ class RuleBasedLLM:
             explicit = bool(_EXPLICIT.match(sent))
             if explicit:
                 sent = _EXPLICIT.sub("", sent).strip()
-                if not sent:
-                    continue
+            m_en = _EN_REMEMBER.match(sent)
+            if m_en:
+                explicit = True
+                sent = _EN_REMEMBER.sub("", sent).strip()
+            if not sent:
+                continue
             emotion = _emotion_of(sent)
             item = self._match_one(sent, explicit, emotion)
             if item:
@@ -76,11 +111,11 @@ class RuleBasedLLM:
         return items
 
     def _match_one(self, sent: str, explicit: bool, emotion: float) -> dict | None:
-        # 偏好（含否定）
+        # 偏好（中文，含否定）
         m = _NEG_PREF.search(sent)
         if m:
             verb, obj = m.group(1), _strip_trailing(m.group(2))
-            neg = re.search(r"(不再|不)", sent[:m.start(1)] or "")
+            neg = bool(_NEG_WORDS.search(sent[:m.start(1)] or ""))
             base_pol = 1 if verb in _POS_VERBS else -1
             polarity = -base_pol if neg else base_pol
             return dict(
@@ -89,7 +124,7 @@ class RuleBasedLLM:
                 importance=0.75 + (0.15 if explicit else 0.0),
                 emotion=emotion, explicit_remember=explicit, sensitivity=1,
             )
-        # 身份
+        # 身份（中文）
         m = _IDENTITY.search(sent)
         if m:
             return dict(
@@ -99,7 +134,7 @@ class RuleBasedLLM:
                 importance=0.85 + (0.05 if explicit else 0.0),
                 emotion=emotion, explicit_remember=explicit, sensitivity=2,
             )
-        # 居住/任职事实
+        # 居住/任职事实（中文）
         m = _RESIDENCE.search(sent)
         if m:
             return dict(
@@ -109,7 +144,7 @@ class RuleBasedLLM:
                 importance=0.6, emotion=emotion,
                 explicit_remember=explicit, sensitivity=1,
             )
-        # 过敏等敏感事实
+        # 过敏等敏感事实（中文）
         m = _ALLERGY.search(sent)
         if m:
             return dict(
@@ -118,7 +153,48 @@ class RuleBasedLLM:
                 importance=0.8 + (0.1 if explicit else 0.0),
                 emotion=emotion, explicit_remember=explicit, sensitivity=2,
             )
-        # 通用槽位事实：『X的Y是Z』（第三人称/复合主语的事实与身份类陈述）
+        # ---- 英文模式
+        m = _EN_PREF.search(sent)
+        if m:
+            phrase = re.sub(r"\s+", " ", m.group(1).lower())
+            if phrase.startswith("can"):
+                pred, pol = "讨厌", -1
+            else:
+                base = re.sub(r"^(?:don'?t|do\s+not)\s+", "", phrase)
+                pred, pol = _EN_PREF_MAP.get(base, ("喜欢", 1))
+                if phrase.startswith(("don", "do ")):
+                    pol = -pol
+            return dict(
+                type="preference", content=sent, subject="user",
+                predicate=pred, object_value=_strip_trailing(m.group(2)),
+                polarity=pol, importance=0.75 + (0.15 if explicit else 0.0),
+                emotion=emotion, explicit_remember=explicit, sensitivity=1,
+            )
+        m = _EN_NAME.search(sent)
+        if m:
+            return dict(
+                type="identity_policy", content=sent, subject="user",
+                predicate="叫", object_value=_strip_trailing(m.group(1)), polarity=0,
+                importance=0.85 + (0.05 if explicit else 0.0),
+                emotion=emotion, explicit_remember=explicit, sensitivity=2,
+            )
+        m = _EN_LIVE.search(sent)
+        if m:
+            return dict(
+                type="fact", content=sent, subject="user",
+                predicate="住在", object_value=_strip_trailing(m.group(1)),
+                polarity=0, importance=0.6, emotion=emotion,
+                explicit_remember=explicit, sensitivity=1,
+            )
+        m = _EN_ALLERGY.search(sent)
+        if m:
+            return dict(
+                type="fact", content=sent, subject="user",
+                predicate="过敏", object_value=_strip_trailing(m.group(1)),
+                polarity=0, importance=0.8 + (0.1 if explicit else 0.0),
+                emotion=emotion, explicit_remember=explicit, sensitivity=2,
+            )
+        # 通用槽位事实：『X的Y是Z』（第三人称/复合主语）
         m = _SLOT_FACT.search(sent)
         if m:
             return dict(
@@ -167,10 +243,16 @@ class RuleBasedLLM:
 
 
 class OpenAICompatibleLLM:
-    """OpenAI 兼容 /chat/completions。任何错误抛给调用方，由 pipeline 决定是否降级到规则。"""
+    """OpenAI 兼容 /chat/completions。
+
+    健壮性（评审 #6）：5xx/429/网络错误指数退避重试；stats 计数
+    requests/retries/errors/calls。任何最终失败抛给调用方，
+    由 pipeline 降级到规则引擎（llm_fallback 事件留痕）。
+    """
 
     def __init__(self, base_url: str, model: str, api_key: str | None = None,
-                 timeout: float = 60.0, temperature: float = 0.2):
+                 timeout: float = 60.0, temperature: float = 0.2,
+                 retry_attempts: int = 3, retry_backoff: float = 0.5):
         if not base_url or not model:
             raise ValueError("openai llm 需要 base_url 与 model")
         self.base_url = base_url.rstrip("/")
@@ -179,27 +261,29 @@ class OpenAICompatibleLLM:
         self.api_key = api_key or os.environ.get("DEUSMITH_LLM_API_KEY", "")
         self.timeout = timeout
         self.temperature = temperature
+        self.retry_attempts = retry_attempts
+        self.retry_backoff = retry_backoff
+        self.stats = {"requests": 0, "retries": 0, "errors": 0, "calls": 0}
 
     def _build_messages(self, system: str, user: str) -> list[dict]:
         return [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
 
+    def stats_snapshot(self) -> dict:
+        return dict(self.stats)
+
     def chat(self, system: str, user: str) -> str:
-        req = urllib.request.Request(
+        self.stats["calls"] += 1
+        data = post_json_with_retry(
             self.endpoint,
-            data=json.dumps({
-                "model": self.model,
-                "messages": self._build_messages(system, user),
-                "temperature": self.temperature,
-            }).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            {"model": self.model,
+             "messages": self._build_messages(system, user),
+             "temperature": self.temperature},
+            {"Content-Type": "application/json",
+             "Authorization": f"Bearer {self.api_key}"},
+            self.timeout,
+            attempts=self.retry_attempts, backoff=self.retry_backoff,
+            stats=self.stats)
         return data["choices"][0]["message"]["content"]
 
     # ---- 三个语义环节的 LLM 版本（prompt 契约与 RuleBasedLLM 输出一致）----
@@ -253,5 +337,7 @@ def get_llm(cfg: dict):
             model=llm_cfg.get("model", ""),
             api_key=llm_cfg.get("api_key"),
             timeout=float(llm_cfg.get("timeout", 60.0)),
+            retry_attempts=int(llm_cfg.get("retry_attempts", 3)),
+            retry_backoff=float(llm_cfg.get("retry_backoff", 0.5)),
         )
     raise ValueError(f"未知 llm provider: {provider}")

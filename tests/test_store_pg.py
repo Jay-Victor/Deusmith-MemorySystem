@@ -155,7 +155,7 @@ class TestPostgresStore(unittest.TestCase):
 
     def test_deep_node_cannot_be_deleted_or_content_updated(self):
         self.store.upsert_node(self._mk(id="pgD1", tier="deep", human_confirmed=True))
-        with self.store.conn.cursor() as cur:
+        with self.store.cursor() as cur:
             with self.assertRaises(Exception):   # I2：DELETE 拦截
                 cur.execute("DELETE FROM memory_node WHERE id='pgD1'")
             with self.assertRaises(Exception):   # I2：内容 UPDATE 拦截
@@ -166,7 +166,7 @@ class TestPostgresStore(unittest.TestCase):
         self.store.deprecate_deep("pgD2", "集成测试废止")
         node = self.store.get_node("pgD2")
         self.assertEqual(node.status.value, "deprecated")
-        with self.store.conn.cursor() as cur:
+        with self.store.cursor() as cur:
             cur.execute("SELECT count(*) AS c FROM memory_version WHERE node_id='pgD2'")
             self.assertEqual(cur.fetchone()["c"], 1)
             cur.execute("SELECT count(*) AS c FROM audit_log "
@@ -187,7 +187,7 @@ class TestPostgresStore(unittest.TestCase):
         self.store.upsert_node(MemoryNode(
             type="fact", content="版本2", scope=self.scope, tier="middle",
             embedding_model="m", id="pgC2", supersedes="pgC1"))
-        with self.store.conn.cursor() as cur:
+        with self.store.cursor() as cur:
             with self.assertRaises(Exception):
                 cur.execute("UPDATE memory_node SET supersedes='pgC2' WHERE id='pgC1'")
 
@@ -204,10 +204,82 @@ class TestPostgresStore(unittest.TestCase):
         self.assertEqual(self.store.get_node("pgU3").id, "pgU3")
 
     def test_hnsw_index_exists(self):
-        with self.store.conn.cursor() as cur:
+        with self.store.cursor() as cur:
             cur.execute("SELECT indexname FROM pg_indexes WHERE tablename='memory_node'")
             names = {r["indexname"] for r in cur.fetchall()}
         self.assertIn("idx_node_vector", names)
+
+    # ------------------------------------------------------------ 阶段二新增：池化 / 会话 / 证据 / 时序 / 追踪
+    def test_pool_concurrent_reads(self):
+        """连接池：8 线程并发检索不崩、结果一致（评审 #4）。"""
+        import threading
+        self.assertIsNotNone(self.store._pool)
+        errs = []
+
+        def worker():
+            try:
+                for _ in range(10):
+                    hits = self.store.vector_search(
+                        self.scope, (1.0, 0, 0, 0, 0, 0, 0, 0), topk=5)
+                    assert isinstance(hits, list)
+            except Exception as e:  # noqa: BLE001
+                errs.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errs, [])
+
+    def test_session_roundtrip_pg(self):
+        from deusmith.llm import RuleBasedLLM
+        from deusmith.params import Params
+        from deusmith.shallow import ShallowSession
+        s = ShallowSession(self.scope, "pg-sess-1", Params(), RuleBasedLLM())
+        s.add_round("user", "你好")
+        s.add_round("user", "我喜欢摄影。")
+        s.rolling_summary = "会话摘要：偏好摄影"
+        self.store.save_session(s)
+        raw = self.store.load_session_raw(self.scope, "pg-sess-1")
+        self.assertEqual(len(raw["rounds"]), 2)
+        self.assertEqual(raw["rounds"][0][1], "你好")
+        self.assertEqual(raw["summary"], "会话摘要：偏好摄影")
+        self.assertIsNone(self.store.load_session_raw("other", "pg-sess-1"))  # I1
+
+    def test_record_evidence_pg(self):
+        self.store.upsert_node(self._mk(id="pgEv1"))
+        self.store.record_evidence("pgEv1", "ev_abc123", "chat", "h123",
+                                   "file:///e/abc.txt")
+        records = self.store.list_evidence("pgEv1")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["evidence_id"], "ev_abc123")
+
+    def test_slot_history_pg(self):
+        from datetime import timedelta
+        from deusmith.models import utcnow
+        now = utcnow()
+        old = self._mk(id="pgT1", subject="user", predicate="住在",
+                       object_value="上海", status="deprecated",
+                       valid_from=now - timedelta(days=60),
+                       valid_to=now - timedelta(days=5))
+        new = self._mk(id="pgT2", subject="user", predicate="住在",
+                       object_value="北京", valid_from=now)
+        self.store.upsert_node(old)
+        self.store.upsert_node(new)
+        hist = self.store.slot_history(self.scope, "user", "住在")
+        self.assertEqual([n.id for n in hist], ["pgT1", "pgT2"])
+        self.assertIsNotNone(hist[0].valid_to)
+        self.assertIsNone(hist[1].valid_to)
+
+    def test_trace_events_pg(self):
+        self.store.log_event("retrieval", {"x": 1}, trace_id="tr_pg",
+                             scope=self.scope)
+        self.store.log_event("inject", {"tokens": 5}, trace_id="tr_pg",
+                             scope=self.scope)
+        evs = self.store.trace_events("tr_pg")
+        self.assertEqual([e["event_type"] for e in evs], ["retrieval", "inject"])
+        self.assertEqual(evs[0]["payload"]["x"], 1)
 
 
 if __name__ == "__main__":

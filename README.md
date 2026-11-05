@@ -3,10 +3,10 @@
 类人脑的智能体记忆管理数据库：**浅层工作记忆 / 中层情景语义记忆 / 深层核心记忆** 三层流转，
 pgvector 语义召回 + 图游走双路检索，证据驱动的可信度与冲突仲裁，写读分离 + 离线治理。
 
-- 后端：**PostgreSQL 17 + pgvector**（单库起步栈，不用 SQLite）
-- Embedding：本地模型 / OpenAI 兼容 API / 零依赖词法哈希（离线保底）三选一
-- LLM 挂钩：抽取/摘要/仲裁可用规则引擎离线跑，也可换 OpenAI 兼容 API
-- 验证：单测 164 · DDL 真引擎 22/22 · 参数一致性 13/13 · 探针门禁 7/7
+- 后端：**PostgreSQL 17 + pgvector**（单库起步栈，不用 SQLite；psycopg_pool 连接池默认开启）
+- Embedding：本地模型（sentence-transformers/bge）/ OpenAI 兼容 API / 零依赖词法哈希 三选一
+- LLM 挂钩：抽取/摘要/仲裁可用规则引擎离线跑（在线 LLM 失败自动降级），也可换 OpenAI 兼容 API
+- 验证：单测 216 · DDL 真引擎 22/22 · 参数一致性 13/13 · 探针门禁 7/7 · CI（GitHub Actions + pgvector 容器）
 
 ## 交付物索引
 
@@ -16,12 +16,13 @@ pgvector 语义召回 + 图游走双路检索，证据驱动的可信度与冲�
 | `docs/01-architecture.md` | 架构：不变量 I1–I10、分层、数据模型、参数耦合、读写离线三路径、演进触发 |
 | `docs/02-schema.sql` | PostgreSQL DDL（约束/索引/触发器/函数；与 `src/deusmith/schema.sql` 逐字节一致） |
 | `docs/03-params.yaml` | 参数表（7 个 tunable 维度，`check_params.py` 保证与代码零漂移） |
-| `docs/04-numeric-examples.md` | 数值演算（m102 勘误 +11.8%）· 衰减曲线 · PG 延迟实测 · 边界表 |
-| `docs/eval-report.md` | 七类探针门禁 7/7 + 相似度判据坏变体对照（污染声明） |
+| `docs/04-numeric-examples.md` | 数值演算（m102 勘误 +11.8%）· 衰减曲线 · PG 延迟实测 · 边界表 · 嵌入基线 |
+| `docs/eval-report.md` | 七类探针门禁 7/7 + 查询探针（dev/held-out 切分）+ 坏变体对照 |
 | `assets/deusmith-architecture.html` | 架构图（主题变量 HTML） |
-| `src/deusmith/` | 实现：`params` `models` `algos` `embeddings` `llm` `store` `shallow` `pipeline` `offline` |
-| `tests/`（164 项） | 单测 + 真 PG 集成测试（无库自动 skip） |
-| `scripts/` | `check_params` `check_sql` `eval_probes` `bench_pg` |
+| `src/deusmith/` | 实现：`params` `models` `algos` `embeddings` `llm` `store` `shallow` `pipeline` `offline` `evidence` `retryhttp` + schema.sql |
+| `tests/`（216 项） | 单测 + 真 PG 集成（池化/会话/证据/时序/追踪）+ API mock 服务器 |
+| `scripts/` | `check_params` `check_sql` `eval_probes` `calibrate` `bench_pg` `init_db` |
+| `.github/workflows/ci.yml` | CI：pgvector 服务容器跑全量验证 |
 | `demo.py` | `--selftest`（25 项边界断言）/ `--demo`（全部数值表） |
 
 ## 快速开始
@@ -99,6 +100,27 @@ report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run("tenant0/user1")
 `embedding.provider=openai|local`、`llm.provider=openai`，密钥走
 `DEUSMITH_EMBEDDING_API_KEY` / `DEUSMITH_LLM_API_KEY` 环境变量。
 
+## 阶段二能力（v0.2.0）
+
+- **连接池化**：`PostgresStore` 默认 psycopg_pool（1–8 连接），线程安全；未安装自动退回单连接。
+- **浅层会话持久化**：`shallow_session`/`shallow_round` 表，进程重启后 `session(id)` 自动恢复（全量轮次落库，内存窗口 10）。
+- **API 硬化**：embedding/LLM 调用带指数退避重试（5xx/429/网络错误）、批量上限、成本计数（`stats`）；写入路径 LLM 失败自动降级规则引擎（`llm_fallback` 事件留痕）。
+- **双时间推理**：高权威纠正写 `valid_from/valid_to` 版本窗口；`slot_history()` 查时序历史（"三月住上海、五月搬北京"）；过期记忆检索降权。
+- **证据存储**：`LocalEvidenceStore` 本地内容寻址（sha256 去重、verify 防篡改），写入路径自动挂 `evidence_refs`。
+- **可解释性**：`explain_injection(trace_id)`（这次注入了什么）、`why_selected(node_id)`（为什么记住）、`explain_score(node_id)`（因子分解）。
+- **抽取覆盖面**：中英文偏好/否定/居住/姓名/过敏/显式记住 + 通用槽位事实；英文 don't/can't 否定。
+- **权重防垄断**：离线治理对节点权重做惰性慢衰减（λ_w=0.002/天，floor 0.2）+ 基尼系数监控（>0.8 告警），防"富者愈富"。
+- **校准协议**：20 条查询探针 70/30 固定种子切分；`calibrate.py` 单维扫参 + held-out 终验（跑过即作废）。
+
+```python
+# 可解释性示例
+out = mem.inject_context(s, "用户的居住地", trace_id="tr_1")
+print(mem.explain_injection("tr_1"))     # 注入内容/预算/降级
+print(mem.why_selected(node_id))         # 哪些检索选中过它
+print(mem.explain_score(node_id))        # weight/recency/conf 因子分解
+print(mem.slot_history("user", "住在"))  # 时序版本链
+```
+
 ## 关键设计（详见 docs/00 评审与 docs/01 架构）
 
 - **冲突判定用槽位身份+极性，不用相似度**：实测否定句（"我不再喜欢摄影了"）与原句
@@ -113,13 +135,9 @@ report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run("tenant0/user1")
 
 ## 已知未验证项（上线前必看）
 
-1. **没跑过的**：Redis / Neo4j / FalkorDB / MinIO / Qdrant 适配器（v1 决策不引入，
-   仅留演进位）；`sentence-transformers` 本地模型与 OpenAI 兼容 API 路径未实测
-   （接口有单测，网络路径未联网验证）；多用户并发与 Windows 以外平台。
-2. **预算而非实测**：注入 Token 用 `estimate_tokens` 估算（CJK 1 token/字、ASCII 4 字符
-   ≈1 token），不是真实 tokenizer；接真实模型前请按其 tokenizer 校准预算。
-3. **参数未校准**：全部超参保持设计文档默认值，未经真实交互数据校准；
-   探针集即开发集（曾用于修 bug，已声明污染），正式调参前需 70/30 切分另建留出集。
+1. **没跑过的**：Redis / Neo4j / FalkorDB / MinIO / Qdrant 适配器（v1 决策不引入，仅留演进位）；OpenAI 兼容 API 的真实外部端点（协议路径已用本地 mock 服务器测过，真实服务商未联网验证）；多用户并发生产负载与 Windows 以外平台的端到端（CI 已覆盖 ubuntu + pgvector 容器的测试矩阵）。
+2. **预算而非实测**：注入 Token 用 `estimate_tokens` 估算（CJK 1 token/字、ASCII 4 字符 ≈1 token），不是真实 tokenizer；接真实模型前请按其 tokenizer 校准预算。
+3. **参数未校准**：全部超参保持设计文档默认值。查询探针量化了 HashEmbedding 的语义缺口（dev 0.214），且参数扫描在 hash 下全线无提升——瓶颈在嵌入层；换真实模型后按 `calibrate.py` 协议重扫（dev 扫参、held-out 终验一次后作废）。探针集 dev 部分已声明污染，held-out 在 v0.2.0 消费过一次。
 
 ## 项目结构
 

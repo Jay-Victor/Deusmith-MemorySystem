@@ -144,6 +144,30 @@ CREATE TABLE IF NOT EXISTS evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_node ON evidence (node_id);
 
+-- ---------------------------------------------------------------- 浅层会话持久化（进程重启可恢复）
+CREATE TABLE IF NOT EXISTS shallow_session (
+    scope           text NOT NULL CHECK (scope <> ''),
+    session_id      text NOT NULL,
+    rolling_summary text NOT NULL DEFAULT '',
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    last_active_at  timestamptz NOT NULL DEFAULT now(),
+    closed_at       timestamptz,
+    PRIMARY KEY (scope, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ss_scope ON shallow_session (scope, last_active_at DESC);
+
+CREATE TABLE IF NOT EXISTS shallow_round (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    scope       text NOT NULL,
+    session_id  text NOT NULL,
+    role        text NOT NULL CHECK (role IN ('user','assistant','tool')),
+    content     text NOT NULL,
+    ts          timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY (scope, session_id)
+        REFERENCES shallow_session (scope, session_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_sr_session ON shallow_round (scope, session_id, id);
+
 -- ============================================================================
 -- 触发器与函数
 -- ============================================================================

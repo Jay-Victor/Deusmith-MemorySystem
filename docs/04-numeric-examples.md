@@ -86,17 +86,20 @@ rel(mX) = 0.0000    （不在任何通道）
 
 ```
 [system] ''
-[user]   '我对花粉过敏\n[记忆冲突] 关于「喜欢」存在相互矛盾的记忆，需要用户确认\n我现在住在北京\n我现在住在上海\nuser: 请记住：我对花粉过敏。\nuser: 我喜欢摄影。\nuser: 我现在住在上海。\nuser: 我现在住在北京。\nuser: 我不再喜欢摄影了。'
+[user]   '我对花粉过敏\n[记忆冲突] 关于「喜欢」存在相互矛盾的记忆，需要用户确认\n我现在住在北京\nuser: 请记住：我对花粉过敏。\nuser: 我喜欢摄影。\nuser: 我现在住在上海。\nuser: 我现在住在北京。\nuser: 我不再喜欢摄影了。'
 [tool]   ''
-tokens=91  degraded=False  conflicts=2
+tokens=84  degraded=False  conflicts=2
 离线治理报告：{'edges_decayed': 4, 'edges_pruned': 0, 'cycles_resolved': 0,
               'summaries_created': 0, 'promoted_deep': 0, 'archived': 0,
-              'consistency_warnings': 0}
+              'consistency_warnings': 0, 'weights_renormalized': 2,
+              'gini_weight': 0.0, 'weight_monopoly_warning': False}
 库内统计：{'nodes_total': 5, 'edges_total': 4}
 ```
 
-行为核对：①高权威纠正生效（记忆层只有「北京」，「上海」行来自会话原文转录）；
-②否定写入进冲突提示而非覆盖；③浅层投影（最近轮原文）附在 user 段尾部。
+行为核对：①高权威纠正生效（记忆层只有「北京」；supersede 写入双时间窗口
+`old.valid_to=now, new.valid_from=now`）；②否定写入进冲突提示而非覆盖；
+③浅层投影（最近轮原文）附在 user 段尾部；④离线治理对 2 个闲置节点做了权重慢
+衰减（阶段二防垄断），5 节点小场景 gini=0（健康）。
 
 ## G. 边界情况（--selftest 25/25 通过）
 
@@ -137,11 +140,15 @@ tokens=91  degraded=False  conflicts=2
 
 | 验证项 | 结果 | 强度 |
 |---|---|---|
-| 单元+集成测试 | **164/164 通过** | InMemory 契约 + 真 PG 集成 |
+| 单元+集成测试 | **216/216 通过** | InMemory 契约 + 真 PG 集成（池化/会话/证据/时序/追踪） |
 | demo --selftest | **25/25 通过** | 边界断言 |
-| scripts/check_sql.py | **22/22 通过** | ①真引擎建库 + 逐条打约束 |
-| scripts/check_params.py | **13/13 通过** | 参数表 ↔ 代码 53 项零漂移 |
-| scripts/eval_probes.py | **7/7 门禁 PASS** | 50 节点七类探针 + 坏变体对照 |
+| scripts/check_sql.py | **22/22 通过** | ①真引擎建库 + 逐条打约束（含 shallow_session/round 表） |
+| scripts/check_params.py | **13/13 通过** | 参数表 ↔ 代码 60 项零漂移 |
+| scripts/eval_probes.py | **7/7 门禁 PASS** | 60 节点七类探针 + 坏变体对照 |
+| 查询探针（hash 基线） | dev **3/14 (0.214)** / held-out **3/6 (0.500)** | 量化 HashEmbedding 语义缺口 |
+| scripts/calibrate.py | 框架跑通 | hash 下所有参数维度均 0.214——瓶颈在嵌入层不在参数层 |
 
 > 诚实声明：HashEmbedding 是词法级占位嵌入（特征哈希），只保证"相似>不相关"的
-> 排序性；换真实语义模型后 §B/E 的绝对分数会变，公式与阈值机制不变。
+> 排序性；查询探针 0.214 的 dev 准确率即其跨措辞召回的真实水平（"爱好"查不到
+> "喜欢"）。换真实语义模型后绝对分数会变，公式与阈值机制不变——这正是
+> "先换 embedding、再调参"的依据：参数扫描在 hash 下全线无提升。

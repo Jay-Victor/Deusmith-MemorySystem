@@ -2,18 +2,19 @@
 """存储层 —— InMemoryStore（零依赖基准）与 PostgresStore（pgvector 真后端）。
 
 两者满足同一契约（tests/test_store_memory.py / test_store_pg.py）。
-后端选择（评审前提：本地部署，PG+pgvector 为唯一持久层）：
-  - PostgresStore：生产/集成默认；DSN 来自 env DEUSMITH_PG_DSN 或 config；
-  - InMemoryStore：单测、演示、无 PG 环境的降级路径。
-
-评审 §八：图游走在 PG 边表 + 递归 CTE 上完成（单机起步栈），
-Neo4j/FalkorDB 为演进项，不在 v1 引入。
+- PostgresStore：psycopg3 + psycopg_pool 连接池（评审 #4）；
+  向量以文本协议收发（'[1,2,...]'::vector），检索走 HNSW 余弦；
+  图游走为逐跳索引 BFS（有界扩展）；边合并/深层保护/supersedes 环检测
+  由 DB 触发器强制（客户端无法绕过）。
+- InMemoryStore：单测、演示、无 PG 环境的降级路径。
+评审 §八：图游走在 PG 边表上完成（单机起步栈），Neo4j/FalkorDB 为演进项。
 """
 from __future__ import annotations
 
 import json
 import os
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,7 +62,7 @@ def _pg_to_vec(s) -> tuple:
 
 
 def _node_to_values(n: MemoryNode) -> dict:
-    d = {
+    return {
         "id": n.id, "type": n.type.value, "content": n.content, "scope": n.scope,
         "tier": n.tier.value, "content_vector": _vec_to_pg(n.content_vector),
         "embedding_model": n.embedding_model,
@@ -81,7 +82,6 @@ def _node_to_values(n: MemoryNode) -> dict:
         "explicit_remember": n.explicit_remember, "human_confirmed": n.human_confirmed,
         "generation": n.generation, "metadata": json.dumps(n.metadata or {}, ensure_ascii=False),
     }
-    return d
 
 
 def _row_to_node(row: dict) -> MemoryNode:
@@ -123,6 +123,15 @@ def _row_to_edge(row: dict) -> MemoryEdge:
     )
 
 
+def _payload_of(p):
+    if isinstance(p, str):
+        try:
+            return json.loads(p)
+        except (ValueError, TypeError):
+            return {}
+    return p or {}
+
+
 class InMemoryStore:
     """零依赖内存实现：与 PostgresStore 同契约，供单测/演示/无库降级。"""
 
@@ -131,6 +140,8 @@ class InMemoryStore:
         self._edges: dict[tuple, MemoryEdge] = {}   # (src,dst,type) -> edge
         self._events: list[dict] = []
         self._audits: list[dict] = []
+        self._sessions: dict[tuple, dict] = {}      # (scope, sid) -> record
+        self._evidence: list[dict] = []
 
     # ---- 基础
     def ensure_schema(self, dim: int = 256) -> None:
@@ -163,6 +174,15 @@ class InMemoryStore:
                 if n.scope == scope and n.subject == subject and n.predicate == predicate
                 and n.status in sts]
 
+    def slot_history(self, scope, subject, predicate) -> list[MemoryNode]:
+        """时序历史（双时间）：同槽位全部版本（含已废止），按生效时间排序。"""
+        hits = [n for n in self._nodes.values()
+                if n.scope == scope and n.subject == subject
+                and n.predicate == predicate
+                and n.status != NodeStatus.deleted_logical]
+        hits.sort(key=lambda n: n.valid_from or n.created_at)
+        return hits
+
     def vector_search(self, scope, query_vec, topk=50, allowed_sensitivity=2):
         hits = []
         for n in self._nodes.values():
@@ -184,8 +204,7 @@ class InMemoryStore:
         return out[:limit]
 
     def neighbors(self, scope, seed_ids, hops=2, max_expand=None):
-        """BFS 扩展。max_expand 限制每跳新增节点数（稠密图必须有界，
-        否则子图边数线性爆炸，见 scripts/bench_pg.py 实测）。"""
+        """BFS 扩展。max_expand 限制每跳新增节点数（稠密图必须有界）。"""
         adj: dict[str, list[tuple[str, MemoryEdge]]] = {}
         for e in self._edges.values():
             if e.scope != scope or e.status == EdgeStatus.pruned:
@@ -222,6 +241,10 @@ class InMemoryStore:
         self._edges[key] = e
         return True
 
+    def update_edge(self, e: MemoryEdge) -> None:
+        """强制替换（离线治理路径用，不触发饱和合并）。"""
+        self._edges[(e.src_id, e.dst_id, e.type)] = e
+
     def get_edges_of(self, scope, node_ids) -> list[MemoryEdge]:
         ids = set(node_ids)
         return [e for (s, d, t), e in self._edges.items()
@@ -232,9 +255,40 @@ class InMemoryStore:
         return [e for e in self._edges.values()
                 if e.scope == scope and e.status != EdgeStatus.pruned]
 
-    def update_edge(self, e: MemoryEdge) -> None:
-        """强制替换（离线治理路径用，不触发饱和合并）。"""
-        self._edges[(e.src_id, e.dst_id, e.type)] = e
+    # ---- 浅层会话持久化（评审 #5）
+    def save_session(self, session) -> None:
+        key = (session.scope, session.id)
+        rec = self._sessions.get(key)
+        if rec is None:
+            rec = {"scope": session.scope, "created_at": session.created_at,
+                   "rounds": []}
+            self._sessions[key] = rec
+        rec.update(summary=session.rolling_summary,
+                   last_active_at=session.last_active_at,
+                   closed_at=session.closed_at)
+        rec["rounds"].extend((r.role, r.content, r.ts)
+                             for r in session.take_unpersisted())
+
+    def load_session_raw(self, scope, session_id) -> dict | None:
+        rec = self._sessions.get((scope, session_id))
+        if rec is None:
+            return None
+        return {"scope": rec["scope"], "summary": rec["summary"],
+                "created_at": rec["created_at"],
+                "last_active_at": rec["last_active_at"],
+                "closed_at": rec["closed_at"], "rounds": list(rec["rounds"])}
+
+    # ---- 证据（评审 #8）
+    def record_evidence(self, node_id, evidence_id, source, content_hash,
+                        pointer_uri) -> None:
+        self._evidence.append({
+            "node_id": node_id, "evidence_id": evidence_id, "source": source,
+            "content_hash": content_hash, "pointer_uri": pointer_uri,
+        })
+
+    def list_evidence(self, node_id=None) -> list[dict]:
+        return [e for e in self._evidence
+                if node_id is None or e["node_id"] == node_id]
 
     # ---- 通道与治理查询
     def recent_active(self, scope, limit=20) -> list[MemoryNode]:
@@ -270,6 +324,10 @@ class InMemoryStore:
         out = [e for e in self._events if not scope or e["scope"] == scope]
         return list(reversed(out[-limit:]))
 
+    def trace_events(self, trace_id) -> list[dict]:
+        """按 trace_id 取全部事件（可解释性，评审 #9）。"""
+        return [e for e in self._events if e.get("trace_id") == trace_id]
+
     def recent_audits(self, limit=20) -> list[dict]:
         return list(reversed(self._audits[-limit:]))
 
@@ -280,32 +338,62 @@ class InMemoryStore:
 
 
 class PostgresStore:
-    """PostgreSQL 17 + pgvector 真后端（psycopg3）。
+    """PostgreSQL 17 + pgvector 真后端（psycopg3 + psycopg_pool 连接池）。
 
-    - 向量以文本协议收发（'[1,2,...]'::vector），不依赖 pgvector-python 包；
-    - 检索用 HNSW 余弦（schema 已建索引）；
-    - 图游走用递归 CTE 双向扩展；
-    - 边合并/深层保护/supersedes 环检测由 DB 触发器强制（客户端无法绕过）。
+    - 池化（评审 #4）：默认 ConnectionPool（min 1 / max 8），线程安全；
+      psycopg_pool 未安装时自动退回单连接。
+    - 检索用 HNSW 余弦；图游走为逐跳索引 BFS（有界扩展）；
+    - 边合并/深层保护/supersedes 环检测由 DB 触发器强制。
     """
 
-    def __init__(self, dsn: str | None = None, dim: int = 256):
+    def __init__(self, dsn: str | None = None, dim: int = 256,
+                 use_pool: bool = True, pool_size: int = 8):
         import psycopg
         from psycopg.rows import dict_row
         self._psycopg = psycopg
         self.dsn = dsn or os.environ.get("DEUSMITH_PG_DSN", DEFAULT_DSN)
         self.dim = dim
-        self.conn = psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row,
-                                    connect_timeout=10)
+        self._pool = None
+        pool_cls = None
+        if use_pool:
+            try:
+                from psycopg_pool import ConnectionPool
+                pool_cls = ConnectionPool
+            except ImportError:
+                pool_cls = None
+        if pool_cls is not None:
+            self._pool = pool_cls(
+                self.dsn, min_size=1, max_size=pool_size, timeout=15, open=True,
+                kwargs=dict(autocommit=True, row_factory=dict_row,
+                            connect_timeout=10))
+            self.conn = None
+        else:
+            self.conn = psycopg.connect(self.dsn, autocommit=True,
+                                        row_factory=dict_row, connect_timeout=10)
+
+    @contextmanager
+    def cursor(self):
+        """统一游标入口：池模式每调用独占一条连接（线程安全）。"""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                with conn.cursor() as cur:
+                    yield cur
+        else:
+            with self.conn.cursor() as cur:
+                yield cur
 
     def ensure_schema(self, dim: int | None = None) -> None:
         dim = dim or self.dim
         sql = SCHEMA_PATH.read_text(encoding="utf-8").replace("__DIM__", str(dim))
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(sql)
 
     def close(self) -> None:
         try:
-            self.conn.close()
+            if self._pool is not None:
+                self._pool.close()
+            elif self.conn is not None:
+                self.conn.close()
         except Exception:
             pass
 
@@ -318,25 +406,22 @@ class PostgresStore:
         sql = (f"INSERT INTO memory_node ({cols}) VALUES ({ph}) "
                f"ON CONFLICT (id) DO UPDATE SET {upd} "
                f"RETURNING (xmax = 0) AS created")
-        vec = vals.pop("content_vector")
-        meta = vals.pop("metadata")
-        args = [vec if c == "content_vector" else
-                (meta if c == "metadata" else vals[c]) for c in _NODE_COLS]
-        with self.conn.cursor() as cur:
+        args = [vals[c] for c in _NODE_COLS]
+        with self.cursor() as cur:
             cur.execute(sql, args)
             row = cur.fetchone()
         return bool(row["created"])
 
     def get_node(self, node_id: str) -> MemoryNode | None:
         cols = ", ".join(_NODE_COLS)
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(f"SELECT {cols} FROM memory_node WHERE id = %s", (node_id,))
             row = cur.fetchone()
         return _row_to_node(row) if row else None
 
     def find_active_by_hash(self, scope, content_hash, embedding_model) -> MemoryNode | None:
         cols = ", ".join(_NODE_COLS)
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 f"SELECT {cols} FROM memory_node WHERE scope=%s AND content_hash=%s "
                 f"AND embedding_model=%s AND status IN ('active','contested') LIMIT 1",
@@ -347,12 +432,24 @@ class PostgresStore:
     def find_by_slot(self, scope, subject, predicate,
                      statuses=("active", "contested")) -> list[MemoryNode]:
         cols = ", ".join(_NODE_COLS)
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 f"SELECT {cols} FROM memory_node WHERE scope=%s AND subject=%s "
                 f"AND predicate=%s AND status = ANY(%s) "
                 f"AND (valid_to IS NULL OR valid_to > now())",
                 (scope, subject, predicate, list(statuses)))
+            rows = cur.fetchall()
+        return [_row_to_node(r) for r in rows]
+
+    def slot_history(self, scope, subject, predicate) -> list[MemoryNode]:
+        """时序历史（双时间）：同槽位全部版本，按生效时间排序。"""
+        cols = ", ".join(_NODE_COLS)
+        with self.cursor() as cur:
+            cur.execute(
+                f"SELECT {cols} FROM memory_node WHERE scope=%s AND subject=%s "
+                f"AND predicate=%s AND status <> 'deleted_logical' "
+                f"ORDER BY COALESCE(valid_from, created_at)",
+                (scope, subject, predicate))
             rows = cur.fetchall()
         return [_row_to_node(r) for r in rows]
 
@@ -363,14 +460,14 @@ class PostgresStore:
                f"FROM memory_node WHERE scope=%s AND status IN ('active','contested') "
                f"AND sensitivity <= %s AND content_vector IS NOT NULL "
                f"ORDER BY content_vector <=> %s::vector LIMIT %s")
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(sql, (qvec, scope, allowed_sensitivity, qvec, topk))
             rows = cur.fetchall()
         return [(_row_to_node(r), float(r["sim"])) for r in rows]
 
     def keyword_search(self, scope, query, limit=20, allowed_sensitivity=2) -> list[MemoryNode]:
         cols = ", ".join(_NODE_COLS)
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 f"SELECT {cols} FROM memory_node WHERE scope=%s AND content ILIKE %s "
                 f"AND status IN ('active','contested') AND sensitivity <= %s "
@@ -380,17 +477,14 @@ class PostgresStore:
         return [_row_to_node(r) for r in rows]
 
     def neighbors(self, scope, seed_ids, hops=2, max_expand=None):
-        """逐跳 BFS（每跳走 src/dst 部分索引），不用全表递归 CTE——实测递归 CTE
-        在 2 万边规模即 150–340ms（全表扫描）。
-        max_expand 限制每跳新增节点（稠密图必须有界：度 20 的 20 万边图上，
-        无界 2 跳会物化上万条子图边，实测 218ms；有界 100/跳 后几十毫秒）。
-        返回 (可达节点集, 子图内边)。"""
+        """逐跳索引 BFS（不用全表递归 CTE——实测 2 万边即 150–340ms）。
+        max_expand 限制每跳新增节点（稠密图必须有界，见 scripts/bench_pg.py）。"""
         seen = set(seed_ids)
         frontier = list(seed_ids)
         for _ in range(max(0, hops)):
             if not frontier:
                 break
-            with self.conn.cursor() as cur:
+            with self.cursor() as cur:
                 cur.execute(
                     "SELECT DISTINCT src_id, dst_id FROM memory_edge "
                     "WHERE scope=%s AND status <> 'pruned' "
@@ -405,7 +499,7 @@ class PostgresStore:
             frontier = [nid for nid in nxt if nid not in seen]
             seen |= nxt
         ids = list(seen)
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 "SELECT * FROM memory_edge WHERE scope=%s AND status <> 'pruned' "
                 "AND src_id = ANY(%s) AND dst_id = ANY(%s)",
@@ -422,13 +516,22 @@ class PostgresStore:
         args = [e.edge_id, e.src_id, e.dst_id, e.type.value, e.direction,
                 e.weight, e.confidence, e.created_at, e.last_reinforced_at,
                 list(e.evidence_refs), e.status.value, e.scope]
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(sql, args)
             row = cur.fetchone()
         return row is not None
 
+    def update_edge(self, e: MemoryEdge) -> None:
+        """强制更新（离线治理路径用；UPDATE 不经过 INSERT 合并触发器）。"""
+        with self.cursor() as cur:
+            cur.execute(
+                "UPDATE memory_edge SET weight=%s, confidence=%s, status=%s, "
+                "last_reinforced_at=%s, evidence_refs=%s WHERE edge_id=%s",
+                (e.weight, e.confidence, e.status.value, e.last_reinforced_at,
+                 list(e.evidence_refs), e.edge_id))
+
     def get_edges_of(self, scope, node_ids) -> list[MemoryEdge]:
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 "SELECT * FROM memory_edge WHERE scope=%s AND status <> 'pruned' "
                 "AND (src_id = ANY(%s) OR dst_id = ANY(%s))",
@@ -437,25 +540,73 @@ class PostgresStore:
         return [_row_to_edge(r) for r in rows]
 
     def all_edges(self, scope) -> list[MemoryEdge]:
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute("SELECT * FROM memory_edge WHERE scope=%s AND status <> 'pruned'",
                         (scope,))
             rows = cur.fetchall()
         return [_row_to_edge(r) for r in rows]
 
-    def update_edge(self, e: MemoryEdge) -> None:
-        """强制更新（离线治理路径用；UPDATE 不经过 INSERT 合并触发器）。"""
-        with self.conn.cursor() as cur:
+    # ---- 浅层会话持久化（评审 #5）
+    def save_session(self, session) -> None:
+        with self.cursor() as cur:
             cur.execute(
-                "UPDATE memory_edge SET weight=%s, confidence=%s, status=%s, "
-                "last_reinforced_at=%s, evidence_refs=%s WHERE edge_id=%s",
-                (e.weight, e.confidence, e.status.value, e.last_reinforced_at,
-                 list(e.evidence_refs), e.edge_id))
+                "INSERT INTO shallow_session (scope, session_id, rolling_summary, "
+                "created_at, last_active_at, closed_at) VALUES (%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (scope, session_id) DO UPDATE SET "
+                "rolling_summary=EXCLUDED.rolling_summary, "
+                "last_active_at=EXCLUDED.last_active_at, "
+                "closed_at=EXCLUDED.closed_at",
+                (session.scope, session.id, session.rolling_summary,
+                 session.created_at, session.last_active_at, session.closed_at))
+            for r in session.take_unpersisted():
+                cur.execute(
+                    "INSERT INTO shallow_round (scope, session_id, role, content, ts) "
+                    "VALUES (%s,%s,%s,%s,%s)",
+                    (session.scope, session.id, r.role, r.content, r.ts))
+
+    def load_session_raw(self, scope, session_id) -> dict | None:
+        with self.cursor() as cur:
+            cur.execute("SELECT * FROM shallow_session WHERE scope=%s AND session_id=%s",
+                        (scope, session_id))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cur.execute(
+                "SELECT role, content, ts FROM shallow_round "
+                "WHERE scope=%s AND session_id=%s ORDER BY id DESC LIMIT 200",
+                (scope, session_id))
+            rounds = [(r["role"], r["content"], r["ts"])
+                      for r in reversed(cur.fetchall())]
+        return {"scope": row["scope"], "summary": row["rolling_summary"],
+                "created_at": row["created_at"],
+                "last_active_at": row["last_active_at"],
+                "closed_at": row["closed_at"], "rounds": rounds}
+
+    # ---- 证据（评审 #8）
+    def record_evidence(self, node_id, evidence_id, source, content_hash,
+                        pointer_uri) -> None:
+        with self.cursor() as cur:
+            cur.execute(
+                "INSERT INTO evidence (evidence_id, node_id, source, content_hash, "
+                "pointer_uri) VALUES (%s,%s,%s,%s,%s) "
+                "ON CONFLICT (evidence_id) DO NOTHING",
+                (evidence_id, node_id, source, content_hash, pointer_uri))
+
+    def list_evidence(self, node_id=None) -> list[dict]:
+        with self.cursor() as cur:
+            if node_id is None:
+                cur.execute("SELECT evidence_id, node_id, source, content_hash, "
+                            "pointer_uri FROM evidence ORDER BY evidence_id")
+            else:
+                cur.execute("SELECT evidence_id, node_id, source, content_hash, "
+                            "pointer_uri FROM evidence WHERE node_id=%s", (node_id,))
+            rows = cur.fetchall()
+        return [dict(r) for r in rows]
 
     # ---- 通道与治理查询
     def recent_active(self, scope, limit=20) -> list[MemoryNode]:
         cols = ", ".join(_NODE_COLS)
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 f"SELECT {cols} FROM memory_node WHERE scope=%s "
                 f"AND status IN ('active','contested') "
@@ -465,7 +616,7 @@ class PostgresStore:
 
     def resident_nodes(self, scope) -> list[MemoryNode]:
         cols = ", ".join(_NODE_COLS)
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 f"SELECT {cols} FROM memory_node WHERE scope=%s AND status='active' "
                 f"AND (explicit_remember OR tier='deep')", (scope,))
@@ -474,19 +625,19 @@ class PostgresStore:
 
     def active_nodes(self, scope, tier=None) -> list[MemoryNode]:
         cols = ", ".join(_NODE_COLS)
-        sql = (f"SELECT {cols} FROM memory_node WHERE scope=%s AND status='active'")
+        sql = f"SELECT {cols} FROM memory_node WHERE scope=%s AND status='active'"
         args: list = [scope]
         if tier is not None:
             sql += " AND tier=%s"
             args.append(tier.value if hasattr(tier, "value") else str(tier))
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(sql, args)
             rows = cur.fetchall()
         return [_row_to_node(r) for r in rows]
 
     # ---- 日志与审计
     def log_event(self, event_type: str, payload: dict, trace_id=None, scope="") -> None:
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 "INSERT INTO event_log (trace_id, event_type, scope, payload) "
                 "VALUES (%s, %s, %s, %s)",
@@ -494,13 +645,13 @@ class PostgresStore:
                  json.dumps(payload, ensure_ascii=False, default=str)))
 
     def audit(self, action: str, node_id: str, detail: dict, trace_id=None) -> None:
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 "INSERT INTO audit_log (action, node_id, detail) VALUES (%s, %s, %s)",
                 (action, node_id, json.dumps(detail, ensure_ascii=False, default=str)))
 
     def recent_events(self, scope, limit=20) -> list[dict]:
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 "SELECT ts, trace_id, event_type, scope, payload FROM event_log "
                 "WHERE scope=%s ORDER BY id DESC LIMIT %s", (scope, limit))
@@ -508,8 +659,17 @@ class PostgresStore:
         return [{"ts": r["ts"], "trace_id": r["trace_id"], "event_type": r["event_type"],
                  "scope": r["scope"], "payload": r["payload"]} for r in rows]
 
+    def trace_events(self, trace_id) -> list[dict]:
+        """按 trace_id 取全部事件（可解释性，评审 #9）。payload 为 jsonb → dict。"""
+        with self.cursor() as cur:
+            cur.execute("SELECT ts, trace_id, event_type, scope, payload FROM event_log "
+                        "WHERE trace_id=%s ORDER BY id", (trace_id,))
+            rows = cur.fetchall()
+        return [{"ts": r["ts"], "trace_id": r["trace_id"], "event_type": r["event_type"],
+                 "scope": r["scope"], "payload": r["payload"]} for r in rows]
+
     def recent_audits(self, limit=20) -> list[dict]:
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute(
                 "SELECT ts, action, node_id, actor, detail FROM audit_log "
                 "ORDER BY id DESC LIMIT %s", (limit,))
@@ -518,7 +678,7 @@ class PostgresStore:
                  "actor": r["actor"], "detail": r["detail"]} for r in rows]
 
     def counts(self, scope) -> dict:
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute("SELECT count(*) AS c FROM memory_node WHERE scope=%s", (scope,))
             nodes = cur.fetchone()["c"]
             cur.execute("SELECT count(*) AS c FROM memory_edge WHERE scope=%s", (scope,))
@@ -527,7 +687,7 @@ class PostgresStore:
 
     # ---- 深层专用
     def deprecate_deep(self, node_id: str, reason: str, actor: str = "system") -> None:
-        with self.conn.cursor() as cur:
+        with self.cursor() as cur:
             cur.execute("SELECT deprecate_deep(%s, %s, %s)", (node_id, reason, actor))
 
 

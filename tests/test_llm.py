@@ -69,6 +69,67 @@ class TestRuleBasedExtraction(unittest.TestCase):
         self.assertTrue(items)
         self.assertEqual(items[0]["type"], "event")
 
+    # ---------------- 英文与扩展模式（评审第一梯队 #2）----------------
+
+    def test_english_preference(self):
+        items = self._extract("I love photography.")
+        prefs = [i for i in items if i["type"] == "preference"]
+        self.assertTrue(prefs)
+        self.assertEqual(prefs[0]["predicate"], "喜欢")
+        self.assertEqual(prefs[0]["polarity"], 1)
+        self.assertEqual(prefs[0]["object_value"], "photography")
+
+    def test_english_negation(self):
+        items = self._extract("I don't like horror movies.")
+        prefs = [i for i in items if i["type"] == "preference"]
+        self.assertTrue(prefs)
+        self.assertEqual(prefs[0]["predicate"], "喜欢")
+        self.assertEqual(prefs[0]["polarity"], -1)
+        self.assertEqual(prefs[0]["object_value"], "horror movies")
+
+    def test_english_residence(self):
+        items = self._extract("I live in Shanghai.")
+        facts = [i for i in items if i["type"] == "fact"]
+        self.assertTrue(facts)
+        self.assertEqual(facts[0]["predicate"], "住在")
+        self.assertEqual(facts[0]["object_value"], "Shanghai")
+
+    def test_english_name(self):
+        items = self._extract("My name is Lei Li.")
+        ids = [i for i in items if i["type"] == "identity_policy"]
+        self.assertTrue(ids)
+        self.assertEqual(ids[0]["object_value"], "Lei Li")
+
+    def test_english_explicit_remember(self):
+        items = self._extract("Please remember that I'm allergic to peanuts.")
+        self.assertTrue(any(i.get("explicit_remember") for i in items))
+        facts = [i for i in items if i["predicate"] == "过敏"]
+        self.assertTrue(facts)
+        self.assertEqual(facts[0]["object_value"], "peanuts")
+
+    def test_english_two_sentences(self):
+        items = self._extract("I love photography. I live in Shanghai.")
+        self.assertEqual(len(items), 2)
+        self.assertEqual({i["predicate"] for i in items}, {"喜欢", "住在"})
+
+    def test_chinese_expertise_verb(self):
+        items = self._extract("我擅长Rust编程。")
+        prefs = [i for i in items if i["type"] == "preference"]
+        self.assertTrue(prefs)
+        self.assertEqual(prefs[0]["predicate"], "擅长")
+        self.assertEqual(prefs[0]["polarity"], 1)
+
+    def test_chinese_negation_word_mei(self):
+        items = self._extract("我没喜欢过加班。")
+        prefs = [i for i in items if i["type"] == "preference"]
+        self.assertTrue(prefs)
+        self.assertEqual(prefs[0]["polarity"], -1)
+
+    def test_decimal_not_split(self):
+        """小数点不是句边界。"""
+        items = self._extract("体重是3.5公斤。")
+        self.assertEqual(len(items), 1)
+
     def test_empty_text(self):
         self.assertEqual(self._extract(""), [])
 

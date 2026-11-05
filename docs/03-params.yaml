@@ -20,6 +20,8 @@ decay.k_activation: 0.3             # S 中 ln(1+activation) 系数
 reinforce.eta: 0.3                  # tunable[reinforce.etas] 节点强化学习率
 reinforce.eta_edge: 0.2            # 边强化学习率
 reinforce.lambda_edge_per_day: 0.01 # 边日衰减率
+reinforce.lambda_node_per_day: 0.002 # 节点权重惰性慢衰减（半衰期≈347天，防富者愈富）
+reinforce.node_weight_floor: 0.2   # 慢衰减下限；低于此值交给归档逻辑
 
 # ---- 可信度（§五.5）权重和=1.2（sigmoid 组合，非 softmax 不必归一）
 confidence.w_source_auth: 0.35
@@ -38,6 +40,7 @@ score.epsilon: 0.5                  # importance 指数
 score.factor_floor: 0.01            # 每因子下限（I4 防零）
 score.mmr_lambda: 0.7               # tunable[score.mmr_lambda] MMR 相关性-多样性折衷
 score.min_score_threshold: 0.45     # 绝对下限：低于此视为"没记住"
+score.historical_penalty: 0.5       # 已过期（valid_to<now）记忆的检索降权
 score.tier_boost.shallow: 0.8
 score.tier_boost.middle: 1.0
 score.tier_boost.deep: 1.15
@@ -73,3 +76,9 @@ tier.edge_prune_confidence: 0.3
 tier.cluster_threshold: 0.9         # tunable[tier.cluster_threshold] 压缩聚类阈值
 tier.max_summary_generation: 2      # 摘要级联深度上限
 tier.summary_max_tokens: 512
+tier.gini_alert: 0.8                # 权重基尼系数告警线（垄断风险）
+
+# ---- 在线 API（embedding/LLM）健壮性
+api.retry_attempts: 3
+api.retry_backoff_base: 0.5
+api.batch_limit: 64                 # embed_batch 单请求上限

@@ -46,6 +46,11 @@ class ReinforceParams:
     eta: float = 0.3                  # 节点强化学习率
     eta_edge: float = 0.2             # 边强化学习率
     lambda_edge_per_day: float = 0.01  # 边日衰减率
+    # 节点权重惰性慢衰减（防富者愈富）：检索命中只升不降会让 weight 长期饱和到
+    # 1.0 失去区分度。慢时钟（半衰期≈347 天）与 recency 快时钟（τ≈7–20 天）分工：
+    # recency 管"新鲜度"，λ_node 管"强化历史强度"。floor 以下不动，交给归档。
+    lambda_node_per_day: float = 0.002
+    node_weight_floor: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,7 @@ class ScoreParams:
         "shallow": 0.8, "middle": 1.0, "deep": 1.15,
     })
     min_score_threshold: float = 0.45  # 绝对下限：低于此视为"没记住"
+    historical_penalty: float = 0.5    # 已过期（valid_to<now）记忆的检索降权
 
 
 @dataclass(frozen=True)
@@ -113,6 +119,15 @@ class TierParams:
     cluster_threshold: float = 0.9
     max_summary_generation: int = 2        # 摘要级联深度上限（评审 §五）
     summary_max_tokens: int = 512
+    gini_alert: float = 0.8                # 权重基尼系数告警线（垄断风险）
+
+
+@dataclass(frozen=True)
+class ApiParams:
+    """在线 API（embedding/LLM）健壮性：重试/退避/批量上限。"""
+    retry_attempts: int = 3
+    retry_backoff_base: float = 0.5
+    batch_limit: int = 64
 
 
 @dataclass(frozen=True)
@@ -123,3 +138,4 @@ class Params:
     score: ScoreParams = field(default_factory=ScoreParams)
     retrieval: RetrievalParams = field(default_factory=RetrievalParams)
     tier: TierParams = field(default_factory=TierParams)
+    api: ApiParams = field(default_factory=ApiParams)

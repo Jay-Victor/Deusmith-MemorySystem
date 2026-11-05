@@ -168,6 +168,9 @@ def retrieval_score(rel_norm: float, node: MemoryNode, now: datetime,
         return 0.0
     rec = decay_recency(node, now, params)
     tier = node.tier.value if hasattr(node.tier, "value") else str(node.tier)
+    boost = sp.tier_boost.get(tier, 1.0)
+    if node.valid_to is not None and node.valid_to <= now:
+        boost *= sp.historical_penalty   # 过期事实降权（双时间，§三）
 
     def clip01(v: float) -> float:
         return min(1.0, max(sp.factor_floor, v))
@@ -178,7 +181,7 @@ def retrieval_score(rel_norm: float, node: MemoryNode, now: datetime,
         * clip01(rec) ** sp.gamma
         * clip01(node.confidence) ** sp.delta
         * clip01(node.importance) ** sp.epsilon
-        * sp.tier_boost.get(tier, 1.0)
+        * boost
     )
 
 
@@ -206,6 +209,32 @@ def rrf_fuse(node_id: str, rankings: dict, params: Params = _PARAMS) -> float:
 
 
 # ---------------------------------------------------------------- 相似度与预算
+
+def gini(values) -> float:
+    """基尼系数 ∈[0,1]（权重防垄断监控）。空/单点/全零返回 0。O(n log n)。"""
+    vals = sorted(float(v) for v in values if v is not None and v >= 0)
+    n = len(vals)
+    if n < 2:
+        return 0.0
+    total = sum(vals)
+    if total <= 0:
+        return 0.0
+    weighted = sum((i + 1) * v for i, v in enumerate(vals))
+    return max(0.0, min(1.0, (2.0 * weighted) / (n * total) - (n + 1) / n))
+
+
+def decay_node_weight(node: MemoryNode, now: datetime,
+                      params: Params = _PARAMS) -> float:
+    """节点权重惰性慢衰减：w' = max(floor, w·exp(−λ_w·Δt_idle))，Δt 取 last_access_at。
+
+    与 recency 的分工：recency 快时钟（τ_base·S≈7–20 天）管"新鲜度"；
+    λ_w 慢时钟（半衰期约一年）管"强化历史强度"——防止长期运行后 weight
+    集体饱和到 1.0 失去区分度（富者愈富）。floor 保底，重要记忆不完全清零。
+    """
+    days = _days_between(now, node.last_access_at)
+    w = node.weight * math.exp(-params.reinforce.lambda_node_per_day * days)
+    return max(params.reinforce.node_weight_floor, min(1.0, w))
+
 
 def cosine(a, b) -> float:
     """纯 Python 余弦相似度；零向量返回 0。"""

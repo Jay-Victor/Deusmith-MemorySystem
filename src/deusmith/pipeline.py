@@ -1,29 +1,31 @@
 # -*- coding: utf-8 -*-
-"""管线层 —— 写入/读取/注入三路径（§五.8 调用顺序）。
+"""管线层 —— 写入/读取/注入三路径（§五.8 调用顺序）+ 阶段二扩展。
 
-写入路径：解析抽取 → 可信度评估 → 幂等/冲突处理 → 节点落库 → 即时建边 → 晋升评估 → 日志
-读取路径：查询解析 → 多路召回（向量/图/关键词/最近/显式）→ 融合去重 → 绝对刻度打分
-          → MMR 裁剪 → 命中强化 → 上下文注入
-注入策略（§六.3）：system 段=深层身份/策略；user 段=相关记忆+冲突提示；
-          tool 段=证据指针；超窗走降级阶梯（裁低分→裁tool→裁浅层→请求确认）。
+写入路径：解析抽取（LLM 失败自动降级规则引擎，评审 #6）→ 可信度评估
+          → 幂等/冲突处理（supersede 写双时间窗口，评审 #7）→ 节点落库
+          （证据挂钩，评审 #8）→ 即时建边 → 晋升评估 → 会话持久化（评审 #5）→ 日志
+读取路径：查询 → 五路召回（向量/图/关键词/最近/显式）→ 融合去重
+          → 绝对刻度打分（过期记忆降权）→ MMR 裁剪 → 命中强化 → 上下文注入
+可解释性（评审 #9）：explain_injection / explain_score / why_selected / slot_history。
 """
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 from .algos import (
-    estimate_confidence, estimate_tokens, is_contradiction, mmr_select,
-    reinforce, retrieval_score, rrf_fuse, tier_transition,
+    decay_recency, estimate_confidence, estimate_tokens, is_contradiction,
+    mmr_select, reinforce, retrieval_score, rrf_fuse, tier_transition,
 )
 from .llm import RuleBasedLLM
 from .models import (
     EdgeType, MemoryEdge, MemoryNode, NodeStatus, NodeType, Tier, utcnow,
 )
 from .params import Params
-from .shallow import ShallowSession
+from .shallow import Round, ShallowSession
 
 
 @dataclass
@@ -34,30 +36,54 @@ class RetrievalResult:
     trace: dict = field(default_factory=dict)
 
 
+def _payload_of(p):
+    if isinstance(p, str):
+        try:
+            return json.loads(p)
+        except (ValueError, TypeError):
+            return {}
+    return p or {}
+
+
 class DeusmithMemory:
     """记忆系统门面：绑定一个 scope（tenant/user，I1）。"""
 
     def __init__(self, store, embedder, llm=None, params: Params | None = None,
-                 scope: str = "default/user", allowed_sensitivity: int = 2):
+                 scope: str = "default/user", allowed_sensitivity: int = 2,
+                 evidence_store=None):
         if not scope or not scope.strip():
             raise ValueError("scope 必填（不变量 I1）")
         self.store = store
         self.embedder = embedder
         self.llm = llm or RuleBasedLLM()
+        self._fallback_llm = RuleBasedLLM()      # 在线 LLM 失败时的离线保底
         self.params = params or Params()
         self.scope = scope
         self.allowed_sensitivity = allowed_sensitivity
+        self.evidence_store = evidence_store
         self._sessions: dict[str, ShallowSession] = {}
 
     # ================================================================ 会话
     def session(self, session_id: str | None = None) -> ShallowSession:
+        """取会话；DB 中已存在则恢复（进程重启不丢，评审 #5），否则新建。"""
         sid = session_id or ("sess_" + uuid.uuid4().hex[:12])
         if sid not in self._sessions:
-            self._sessions[sid] = ShallowSession(self.scope, sid, self.params, self.llm)
+            raw = self.store.load_session_raw(self.scope, sid)
+            if raw is not None:
+                s = ShallowSession(self.scope, sid, self.params, self.llm)
+                s.created_at = raw["created_at"]
+                s.last_active_at = raw["last_active_at"]
+                s.closed_at = raw["closed_at"]
+                s.rolling_summary = raw["summary"] or ""
+                for role, content, ts in raw["rounds"]:
+                    s.rounds.append(Round(role=role, content=content, ts=ts))
+            else:
+                s = ShallowSession(self.scope, sid, self.params, self.llm)
+            self._sessions[sid] = s
         return self._sessions[sid]
 
     def end_session(self, session: ShallowSession, trace_id: str | None = None) -> None:
-        """会话结束（§二.1 触发）：终态摘要 → 浅层晋升评估 → 记日志 → 登记 30min 清理。"""
+        """会话结束（§二.1 触发）：终态摘要 → 浅层晋升评估 → 持久化 → 记日志。"""
         session.maybe_update_summary()
         session.close()
         for node in self.store.active_nodes(self.scope, tier=Tier.shallow):
@@ -66,12 +92,13 @@ class DeusmithMemory:
                 if action == "promote_to_middle":
                     node.tier = Tier.middle
                     self.store.upsert_node(node)
+        self.store.save_session(session)
         self.store.log_event("session_end", {
             "session_id": session.id, "summary": session.rolling_summary[:200],
         }, trace_id=trace_id, scope=self.scope)
 
     def cleanup_expired_sessions(self, now: datetime | None = None) -> list[str]:
-        """清理超过 30 分钟的会话原文（浅层 TTL）。返回被清理的会话 id。"""
+        """清理超过 30 分钟的会话原文（浅层 TTL；DB 行保留作审计）。"""
         now = now or utcnow()
         expired = [sid for sid, s in self._sessions.items()
                    if s.expiry_at() and now >= s.expiry_at()]
@@ -86,13 +113,27 @@ class DeusmithMemory:
               source_auth: float = 0.8, trace_id: str | None = None) -> list[MemoryNode]:
         session.add_round("user", text)
         session.maybe_update_summary()
-        items = self.llm.extract(text)
+        try:
+            items = self.llm.extract(text)
+        except Exception as exc:                     # 在线 LLM 失败 → 规则兜底
+            self.store.log_event("llm_fallback", {"error": str(exc)[:200]},
+                                 trace_id=trace_id, scope=self.scope)
+            items = self._fallback_llm.extract(text)
         written: list[MemoryNode] = []
         for item in items:
             node = self._build_node(session, item, source, source_auth)
+            ev = None
+            if self.evidence_store is not None:
+                ev = self.evidence_store.save(item["content"], source=source)
+                node.evidence_refs = node.evidence_refs + (ev["evidence_id"],)
             result = self._ingest(session, node, trace_id)
             if result is not None:
+                if ev is not None:
+                    self.store.record_evidence(
+                        result.id, ev["evidence_id"], source,
+                        ev["content_hash"], ev["pointer_uri"])
                 written.append(result)
+        self.store.save_session(session)
         self.store.log_event("write", {
             "text": text[:200], "items": len(items),
             "node_ids": [n.id for n in written],
@@ -154,8 +195,9 @@ class DeusmithMemory:
     def _handle_conflict(self, session: ShallowSession, old: MemoryNode,
                          new: MemoryNode, now: datetime,
                          trace_id: str | None) -> MemoryNode:
-        """冲突仲裁（§五.5）：深层红线 → 只争议不覆盖；权威明确 → supersedes；
-        势均力敌 → 双版本 contested 请求确认。"""
+        """冲突仲裁（§五.5）：深层红线 → 只争议不覆盖；权威明确 → supersedes
+        （写双时间窗口：old.valid_to=now，new.valid_from=now）；势均力敌 →
+        双版本 contested 请求确认。"""
         new.tier = Tier.middle   # 挑战者不因冲突直接进入旧节点层级（晋升走正规门槛）
 
         if old.tier == Tier.deep:
@@ -176,14 +218,16 @@ class DeusmithMemory:
         if verdict == "prefer_b":
             new.supersedes = old.id
             new.status = NodeStatus.active
+            new.valid_from = new.valid_from or now       # 双时间（评审 #7）
             old.status = NodeStatus.deprecated
+            old.valid_to = now                            # 旧版本失效时间
             self.store.upsert_node(old)
             self.store.upsert_node(new)
             self._add_contradicts_edge(new, old)
             self.store.audit("conflict_resolved", old.id, {
                 "winner": new.id, "verdict": "prefer_b",
             }, trace_id=trace_id)
-        else:  # prefer_a / contested：双版本保留，等确认
+        else:  # prefer_a / contested：双版本保留，等确认（不写时间窗）
             new.status = NodeStatus.contested
             new.contested_by = old.id
             old.status = NodeStatus.contested
@@ -246,7 +290,7 @@ class DeusmithMemory:
                  trace_id: str | None = None) -> RetrievalResult:
         now = utcnow()
         trace_id = trace_id or ("tr_" + uuid.uuid4().hex[:10])
-        qvec = self.embedder.embed(query)
+        qvec = self.embedder.embed_query(query)     # 查询侧嵌入（bge 类带指令前缀）
         rp = self.params.retrieval
 
         # ---- 多路召回（§六.1）
@@ -279,7 +323,9 @@ class DeusmithMemory:
             "explicit": [n.id for n in resident],
         }
 
-        # ---- 候选收集 + 敏感门控（I10）
+        # ---- 候选收集 + 敏感门控（I10）+ 状态门控
+        # （图通道的边不过滤对端节点状态：deprecated/归档版本可经边游走
+        #   回到候选池，必须在此统一拦截，否则被替代的旧值重新参选）
         candidates: dict[str, MemoryNode] = {}
         filtered_reasons: list[str] = []
         for ids in rankings.values():
@@ -289,12 +335,14 @@ class DeusmithMemory:
                 node = self.store.get_node(nid)
                 if node is None:
                     continue
+                if node.status not in (NodeStatus.active, NodeStatus.contested):
+                    continue
                 if node.sensitivity > self.allowed_sensitivity:
                     filtered_reasons.append(f"sensitivity:{nid}:level={node.sensitivity}")
                     continue
                 candidates[nid] = node
 
-        # ---- 融合去重 + 打分（I4：绝对刻度）
+        # ---- 融合去重 + 打分（I4：绝对刻度；过期记忆降权）
         scored = []
         for nid, node in candidates.items():
             rel = rrf_fuse(nid, rankings, self.params)
@@ -397,7 +445,7 @@ class DeusmithMemory:
         total = tok(system_parts) + tok(user_parts) + tok(tool_parts) \
             + estimate_tokens(shallow_text)
         degraded = False
-        # 降级阶梯 1：裁低分记忆候选（user 段按分数序，尾部最低分）
+        # 降级阶梯 1：裁低分记忆候选
         while total > budget and user_parts:
             dropped = user_parts.pop()
             total -= estimate_tokens(dropped)
@@ -434,3 +482,65 @@ class DeusmithMemory:
             "selected_ids": out["selected"],
         }, trace_id=res.trace.get("trace_id"), scope=self.scope)
         return out
+
+    # ================================================================ 可解释性（评审 #9）
+    def explain_injection(self, trace_id: str) -> dict:
+        """"这次注入了什么、为什么"：按 trace_id 还原注入事件。"""
+        events = self.store.trace_events(trace_id)
+        inject = [e for e in events if e["event_type"] == "inject"]
+        if not inject:
+            return {"trace_id": trace_id, "found": False}
+        payload = _payload_of(inject[-1].get("payload"))
+        return {
+            "trace_id": trace_id, "found": True,
+            "query": payload.get("query"), "tokens": payload.get("tokens"),
+            "degraded": payload.get("degraded"),
+            "selected": payload.get("selected_ids"),
+            "events": [e["event_type"] for e in events],
+        }
+
+    def why_selected(self, node_id: str, limit: int = 10) -> list[dict]:
+        """"你为什么记住了这个"：哪些检索轮次选中了该节点、当时得分。"""
+        out = []
+        for e in self.store.recent_events(self.scope, limit=200):
+            if e["event_type"] != "retrieval":
+                continue
+            p = _payload_of(e.get("payload"))
+            if node_id in (p.get("selected_ids") or []):
+                out.append({"trace_id": e.get("trace_id"),
+                            "query": p.get("query"),
+                            "score": (p.get("scores") or {}).get(node_id)})
+        return out[:limit]
+
+    def explain_score(self, node_id: str) -> dict:
+        """"这条记忆为什么排这么高"：因子分解 + rel=1.0 时的上限分。"""
+        n = self.store.get_node(node_id)
+        if n is None:
+            return {"found": False}
+        now = utcnow()
+        rec = decay_recency(n, now, self.params)
+        return {
+            "found": True, "node_id": node_id, "type": n.type.value,
+            "tier": n.tier.value, "status": n.status.value, "content": n.content,
+            "factors": {
+                "weight": round(n.weight, 4), "recency": round(rec, 4),
+                "confidence": round(n.confidence, 4),
+                "importance": round(n.importance, 4),
+                "activation_count": n.activation_count,
+                "tier_boost": self.params.score.tier_boost.get(n.tier.value),
+                "valid_to": n.valid_to.isoformat() if n.valid_to else None,
+            },
+            "score_at_full_rel": round(
+                retrieval_score(1.0, n, now, self.allowed_sensitivity,
+                                self.params), 4),
+            "last_access_at": n.last_access_at.isoformat(),
+        }
+
+    def slot_history(self, subject: str, predicate: str) -> list[dict]:
+        """时序历史（双时间，评审 #7）：同槽位全部版本按生效时间排列。"""
+        nodes = self.store.slot_history(self.scope, subject, predicate)
+        return [{
+            "node_id": n.id, "content": n.content, "status": n.status.value,
+            "valid_from": n.valid_from.isoformat() if n.valid_from else None,
+            "valid_to": n.valid_to.isoformat() if n.valid_to else None,
+        } for n in nodes]

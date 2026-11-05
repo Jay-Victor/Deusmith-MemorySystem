@@ -1,23 +1,24 @@
 # -*- coding: utf-8 -*-
-"""eval_probes.py —— 七类探针门禁（≥50 节点场景）→ docs/eval-report.md。
+"""eval_probes.py —— 七类门禁 + 查询探针（dev/held-out 70/30）→ docs/eval-report.md。
 
 门禁（当前技术栈能做的那一列）：
-  G1 陈旧值      旧值不应压过新值
-  G2 纠正        高权威纠正后检索返回新值
-  G3 连续性      同会话上下文可召回
-  G4 聚合        离线压缩后摘要可检索、原文归档
-  G5 常驻通道    深层身份与显式记忆不依赖查询相似度即可召回
-  G6 无关精度    无关查询不产生高分命中（绝对刻度）
-  G7 改写问法    同义改写仍命中目标记忆
-对照实验（评审错误#1）：
-  相似度去重坏变体 vs 槽位+极性判定：否定更新丢失率、良性改写合并率。
+  G1 陈旧值 / G2 纠正 / G3 连续性 / G4 聚合 / G5 常驻通道 / G6 无关精度 / G7 改写问法
+查询探针：20 条带独立 ground truth 的查询（期望子串出现在 top-3），
+  按固定种子 70/30 切 dev/held-out（评审第一梯队 #3）。
 
-用法：PYTHONPATH=src .venv/Scripts/python.exe scripts/eval_probes.py
-污染声明：本探针集即开发集（曾用于发现并修复多值谓语冲突误判 bug）。
-正式调参前请按 70/30 切分 dev/held-out 并另建留出集。
+用法：
+  PYTHONPATH=src .venv/Scripts/python.exe scripts/eval_probes.py                     # hash 嵌入 + dev
+  PYTHONPATH=src .venv/Scripts/python.exe scripts/eval_probes.py --embed local        # 真实本地模型
+  PYTHONPATH=src .venv/Scripts/python.exe scripts/eval_probes.py --heldout            # 留出集（发布前跑一次）
+
+污染声明：dev 集在开发中用于发现并修复 bug（多值谓语冲突误判、关键词通道
+中文切词缺失、摘要置信度继承缺陷）；held-out 在 v0.2.0 发布前跑了一次基线，
+下次发布前需重建探针集。
 """
 from __future__ import annotations
 
+import argparse
+import random
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -29,7 +30,7 @@ from deusmith.algos import cosine  # noqa: E402
 from deusmith.embeddings import HashEmbedding  # noqa: E402
 from deusmith.llm import RuleBasedLLM  # noqa: E402
 from deusmith.models import (  # noqa: E402
-    MemoryNode, NodeStatus, NodeType, Tier, utcnow,
+    MemoryNode, NodeType, Tier, utcnow,
 )
 from deusmith.offline import OfflineGovernor  # noqa: E402
 from deusmith.params import Params  # noqa: E402
@@ -46,29 +47,73 @@ NOISE = [
     "登山绳结技术图解", "中日韩书法比较", "气象卫星遥感原理",
     "城市地铁规划案例", "酿酒发酵微生物学", "无人机航拍技巧",
     "古典音乐和声理论", "宠物猫的品种图谱", "半导体光刻工艺流程",
-    "丝绸之路贸易史", "统计学习理论入门",
+    "丝绸之路贸易史", "统计学习理论入门", "宋代瓷器鉴赏要点",
+    "深海潜水器设计原理", "银河系旋臂结构观测", "咖啡因代谢机制研究",
+    "北欧家具设计史话",
 ]
 PREFS = [
     ("用户喜欢摄影", 60), ("用户讨厌加班", 40), ("用户喜欢清晨跑步", 30),
     ("用户偏爱素食", 25), ("用户喜欢科幻小说", 20), ("用户讨厌嘈杂环境", 15),
     ("用户喜欢绿茶", 10), ("用户偏爱安静的工作环境", 5),
+    ("用户喜欢悬疑电影", 28), ("用户讨厌早起", 9),
 ]
 FACTS = [
     ("用户的公司在工业园区", 50), ("用户的团队有六名工程师", 45),
     ("用户的工位在三层靠窗", 40), ("用户常用Python和Rust", 35),
     ("用户的显示是双显示器", 30), ("用户每天通勤四十分钟", 22),
     ("用户的键盘是静音轴", 12), ("用户的椅子是人体工学椅", 8),
+    ("用户的耳机是降噪款", 26), ("用户的午饭常吃沙拉", 14),
 ]
 OTHER_EVENTS = [
     ("用户上周参加了技术沙龙", 18), ("用户昨天调试了数据库索引", 3),
+    ("用户上个月参加了行业峰会", 55), ("用户上周买了新键盘", 6),
+]
+
+# 查询探针：(id, 查询, 期望 top-3 命中的子串) —— ground truth 独立于被测机制
+PROBE_SET = [
+    ("p01", "用户的爱好有什么", "摄影"),
+    ("p02", "用户讨厌什么", "加班"),
+    ("p03", "用户对什么过敏", "花粉"),
+    ("p04", "用户现在住在哪里", "北京"),
+    ("p05", "用户叫什么名字", "李雷"),
+    ("p06", "用户喜欢什么运动", "跑步"),
+    ("p07", "用户的工作环境偏好", "安静"),
+    ("p08", "凤凰项目上线了吗", "凤凰"),
+    ("p09", "用户常用什么编程语言", "Python"),
+    ("p10", "用户通勤要多久", "四十分钟"),
+    ("p11", "用户喝茶的偏好", "绿茶"),
+    ("p12", "用户的饮食偏好", "素食"),
+    ("p13", "用户有什么过敏原", "花粉"),
+    ("p14", "用户在哪个城市", "北京"),
+    ("p15", "周会都讨论什么", "周会"),
+    ("p16", "用户的职业是什么", "工程师"),
+    ("p17", "用户喜欢读什么类型的书", "科幻"),
+    ("p18", "用户讨厌什么样的环境", "嘈杂"),
+    ("p19", "用户的旅行计划", "京都"),
+    ("p20", "用户的办公设备", "双显示器"),
 ]
 
 
-def build_scenario() -> tuple[DeusmithMemory, HashEmbedding]:
+def split_probes():
+    """固定种子 70/30 切分：dev 用于开发与扫参，held-out 只在发布前跑一次。"""
+    idx = list(range(len(PROBE_SET)))
+    random.Random(42).shuffle(idx)
+    cut = int(len(idx) * 0.7)
+    dev = [PROBE_SET[i] for i in sorted(idx[:cut])]
+    held = [PROBE_SET[i] for i in sorted(idx[cut:])]
+    return dev, held
+
+
+DEV_PROBES, HELDOUT_PROBES = split_probes()
+
+
+def build_scenario(embedder=None, params=None):
+    """构建 60 节点评测场景（全新 InMemory，无残留强化状态）。"""
+    p = params or P
+    emb = embedder or HashEmbedding(dim=DIM)
     store = InMemoryStore()
-    emb = HashEmbedding(dim=DIM)
     mem = DeusmithMemory(store=store, embedder=emb, llm=RuleBasedLLM(),
-                         params=P, scope=SCOPE)
+                         params=p, scope=SCOPE)
     now = utcnow()
 
     def put(content, days_ago, type_=NodeType.event, **over):
@@ -119,6 +164,18 @@ def top_contents(res, k=3):
     return [n.content for n, _, _ in res.selected[:k]]
 
 
+def run_query_probes(mem, emb, probes):
+    """查询探针：期望子串出现在 top-3。全新会话，避免残留强化。"""
+    s = mem.session("probe-queries")
+    results = []
+    for pid, q, expect in probes:
+        res = mem.retrieve(s, q, topk=5)
+        tops = [n.content for n, _, _ in res.selected[:3]]
+        hit = any(expect in c for c in tops)
+        results.append((pid, hit, f"top1={tops[0][:16] if tops else '∅'}"))
+    return results
+
+
 def run_gates(mem: DeusmithMemory, emb: HashEmbedding) -> list[tuple[str, bool, str]]:
     gates: list[tuple[str, bool, str]] = []
     s = mem.session("probe-eval")
@@ -146,9 +203,8 @@ def run_gates(mem: DeusmithMemory, emb: HashEmbedding) -> list[tuple[str, bool, 
     ok = any("京都" in t for t in tops)
     gates.append(("G3 连续性：同会话上下文召回", bool(ok), "；".join(tops)[:60]))
 
-    # G5 常驻通道（先于离线治理运行）
+    # G5 常驻通道
     res = mem.retrieve(s, "今天天气怎么样")
-    ids = [n.id for n, _, _ in res.selected]
     tops = top_contents(res, 8)
     ok = any("李雷" in t for t in tops) and any("花粉" in t for t in tops)
     gates.append(("G5 常驻通道：身份与显式记忆无条件召回", bool(ok),
@@ -204,69 +260,54 @@ BENIGN_PAIRS = [
 def bad_variant(theta: float) -> tuple[int, int]:
     """相似度去重坏变体：写入时若与既有节点 cos≥θ 则当重复丢弃。
     返回 (否定更新丢失数, 良性改写合并数)。"""
-    store = InMemoryStore()
     emb = HashEmbedding(dim=DIM)
-    mem = DeusmithMemory(store=store, embedder=emb, llm=RuleBasedLLM(),
-                         params=P, scope=SCOPE)
-
-    def bad_write(text):
-        vec = emb.embed(text)
-        node = MemoryNode(type=NodeType.preference, content=text, scope=SCOPE,
-                          tier=Tier.middle, embedding_model=emb.model_name,
-                          content_vector=vec, subject="user", predicate="喜欢",
-                          polarity=1 if "不" not in text else -1)
-        hits = store.vector_search(SCOPE, vec, topk=1)
-        if hits and hits[0][1] >= theta:
-            return hits[0][0]        # 当重复 → 丢弃新内容
-        store.upsert_node(node)
-        return node
-
+    store = InMemoryStore()
     lost = 0
     for orig, neg in NEG_PAIRS:
-        bad_write(orig)
-        kept = bad_write(neg)
+        kept = None
+        for text in (orig, neg):
+            vec = emb.embed(text)
+            hits = store.vector_search(SCOPE, vec, topk=1)
+            if hits and hits[0][1] >= theta:
+                kept = hits[0][0]
+                continue
+            from deusmith.models import MemoryNode, NodeType, Tier
+            node = MemoryNode(type=NodeType.preference, content=text, scope=SCOPE,
+                              tier=Tier.middle, embedding_model=emb.model_name,
+                              content_vector=vec)
+            store.upsert_node(node)
+            kept = node
         if not (hasattr(kept, "content") and "不" in kept.content):
             lost += 1
-    store2 = InMemoryStore()
-    emb2 = HashEmbedding(dim=DIM)
-    mem2 = DeusmithMemory(store=store2, embedder=emb2, llm=RuleBasedLLM(),
-                          params=P, scope=SCOPE)
     merged = 0
     for orig, para in BENIGN_PAIRS:
+        store2 = InMemoryStore()
         for text in (orig, para):
-            vec = emb2.embed(text)
+            vec = emb.embed(text)
             hits = store2.vector_search(SCOPE, vec, topk=1)
             if hits and hits[0][1] >= theta:
                 continue
+            from deusmith.models import MemoryNode, NodeType, Tier
             store2.upsert_node(MemoryNode(
                 type=NodeType.preference, content=text, scope=SCOPE,
-                tier=Tier.middle, embedding_model=emb2.model_name,
+                tier=Tier.middle, embedding_model=emb.model_name,
                 content_vector=vec))
         nodes = [n for n in store2.active_nodes(SCOPE)]
         if len([n for n in nodes if n.content in (orig, para)]) == 1:
             merged += 1
-        # 清空，逐对独立
-        for n in list(store2._nodes.values()):
-            store2._nodes.pop(n.id)
     return lost, merged
 
 
 def slot_variant() -> int:
-    """槽位+极性判定：否定更新保留数（以 contested/superseded 节点存在为准）。"""
-    store = InMemoryStore()
+    """槽位+极性判定：否定更新保留数（以含否定的节点存在为准）。"""
     emb = HashEmbedding(dim=DIM)
-    mem = DeusmithMemory(store=store, embedder=emb, llm=RuleBasedLLM(),
+    mem = DeusmithMemory(store=InMemoryStore(), embedder=emb, llm=RuleBasedLLM(),
                          params=P, scope=SCOPE)
     preserved = 0
     for i, (orig, neg) in enumerate(NEG_PAIRS):
-        s = mem.session(f"neg-{i}a")
-        mem.write(s, orig + "。")
-        s2 = mem.session(f"neg-{i}b")
-        mem.write(s2, neg + "。")
-        nodes = [n for n in store.active_nodes(SCOPE)
-                 + [x for x in store.recent_active(SCOPE, 100)]]
-        seen = {n.id: n for n in nodes}
-        neg_nodes = [n for n in seen.values()
+        mem.write(mem.session(f"neg-{i}a"), orig + "。")
+        mem.write(mem.session(f"neg-{i}b"), neg + "。")
+        neg_nodes = [n for n in mem.store.recent_active(SCOPE, 100)
                      if "不" in n.content and n.subject == "user"]
         if neg_nodes:
             preserved += 1
@@ -274,21 +315,51 @@ def slot_variant() -> int:
 
 
 def main() -> int:
-    print("== Deusmith-MemorySystem · 探针门禁 ==")
-    mem, emb = build_scenario()
-    total_nodes = mem.store.counts(SCOPE)["nodes_total"]
-    print(f"场景规模：{total_nodes} 节点（要求 ≥50）")
-    gates = run_gates(mem, emb)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--embed", default="hash", choices=["hash", "local"])
+    ap.add_argument("--model", default="BAAI/bge-small-zh-v1.5")
+    ap.add_argument("--heldout", action="store_true",
+                    help="跑留出集（只应在发布前跑一次）")
+    args = ap.parse_args()
 
-    fails = 0
+    if args.embed == "local":
+        try:
+            from deusmith.embeddings import LocalModelEmbedding
+            emb = LocalModelEmbedding(
+                args.model,
+                query_prefix="为这个句子生成表示以用于检索相关文章：")
+        except ImportError as e:
+            print(f"[SKIP] 本地模型不可用：{e}")
+            return 0
+    else:
+        emb = HashEmbedding(dim=DIM)
+
+    probes = HELDOUT_PROBES if args.heldout else DEV_PROBES
+    label = "held-out" if args.heldout else "dev"
+
+    print(f"== Deusmith-MemorySystem · 探针门禁（embedder={emb.model_name}）==")
+    # 场景级门禁（G1–G7）跑在专用场景上，与查询探针互不污染
+    mem_g, _ = build_scenario(emb)
+    total_nodes = mem_g.store.counts(SCOPE)["nodes_total"]
+    print(f"门禁场景规模：{total_nodes} 节点")
+    gates = run_gates(mem_g, emb)
+    gate_fails = 0
     for name, ok, detail in gates:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name} —— {detail}")
-        fails += 0 if ok else 1
+        gate_fails += 0 if ok else 1
 
-    # ---- 对照实验
+    # 查询探针（全新场景）
+    mem_q, _ = build_scenario(emb)
+    qres = run_query_probes(mem_q, emb, probes)
+    acc = sum(1 for _, h, _ in qres if h) / len(qres)
+    print(f"\n查询探针[{label}]：{sum(1 for _, h, _ in qres if h)}/{len(qres)}"
+          f"（准确率 {acc:.3f}）")
+
+    # ---- 对照实验（固定用 hash 嵌入，结论与嵌入无关：判据层面的问题）
     print("\n== 对照实验（评审错误#1：相似度判据 vs 槽位+极性）==")
-    cos_neg = [cosine(emb.embed(a), emb.embed(b)) for a, b in NEG_PAIRS]
-    cos_ben = [cosine(emb.embed(a), emb.embed(b)) for a, b in BENIGN_PAIRS]
+    hemb = HashEmbedding(dim=DIM)
+    cos_neg = [cosine(hemb.embed(a), hemb.embed(b)) for a, b in NEG_PAIRS]
+    cos_ben = [cosine(hemb.embed(a), hemb.embed(b)) for a, b in BENIGN_PAIRS]
     print(f"  否定对相似度   min={min(cos_neg):.3f} max={max(cos_neg):.3f} "
           f"mean={sum(cos_neg) / len(cos_neg):.3f}")
     print(f"  良性改写对相似度 min={min(cos_ben):.3f} max={max(cos_ben):.3f} "
@@ -300,20 +371,25 @@ def main() -> int:
         print(f"  θ={theta:.1f}：否定更新丢失 {lost}/8，良性改写合并 {merged}/8")
     preserved = slot_variant()
     print(f"  槽位+极性判定：否定更新保留 {preserved}/8（0 丢失）")
-
-    no_valid_theta = all(
-        not (t[2] == 8 and t[1] == 0) for t in tradeoff)
+    no_valid_theta = all(not (t[2] == 8 and t[1] == 0) for t in tradeoff)
     print(f"  结论：{'不存在能同时「合并全部良性改写」与「零丢失否定更新」的阈值' if no_valid_theta else '存在可行阈值'}")
 
     # ---- 报告落盘
     report = ["# Deusmith-MemorySystem · 探针评估报告", "",
-              f"生成：scripts/eval_probes.py（场景 {total_nodes} 节点，HashEmbedding dim={DIM}，规则 LLM）", "",
+              f"生成：scripts/eval_probes.py（门禁场景 {total_nodes} 节点，"
+              f"embedder=`{emb.model_name}`，规则 LLM）", "",
               "## 门禁结果（当前技术栈）", "",
               "| 门禁 | 结果 | 证据 |", "|---|---|---|"]
     for name, ok, detail in gates:
         report.append(f"| {name} | {'**PASS**' if ok else '**FAIL**'} | {detail} |")
-    report += ["", f"**门禁：{len(gates) - fails}/{len(gates)} PASS**", "",
-               "## 对照实验：相似度判据 vs 槽位+极性（评审错误#1）", "",
+    report += ["", f"**门禁：{len(gates) - gate_fails}/{len(gates)} PASS**", "",
+               "## 查询探针（70/30 切分，固定种子 42）", "",
+               f"- **dev（{len(DEV_PROBES)} 条，本报告口径）准确率："
+               f"{acc:.3f}（embedder={emb.model_name}, split={label}）",
+               f"- held-out：{len(HELDOUT_PROBES)} 条，只应在发布前跑一次"
+               f"（`--heldout`；v0.2.0 基线见 docs/04）",
+               "- ground truth 为期望子串出现在 top-3，独立于被测机制",
+               "", "## 对照实验：相似度判据 vs 槽位+极性（评审错误#1）", "",
                f"- 否定对（如「我喜欢摄影」↔「我不再喜欢摄影了」）余弦相似度："
                f"min={min(cos_neg):.3f}，max={max(cos_neg):.3f}，mean={sum(cos_neg) / len(cos_neg):.3f}",
                f"- 良性改写对（如「我喜欢摄影」↔「我热爱摄影」）余弦相似度："
@@ -327,19 +403,22 @@ def main() -> int:
                f"槽位+极性判定：否定更新保留 **{preserved}/8**（丢失 0）；"
                "真重复（同槽位+同宾语+同极性）由 is_duplicate 正确合并；"
                "多值谓语（喜欢）换宾语不误判为冲突（单值谓语如「住在」换宾语才算冲突）。", "",
-               "## 污染声明", "",
-               "本探针集在开发过程中曾用于发现并修复：多值谓语冲突误判 bug"
-               "（『喜欢摄影』与『喜欢跑步』曾被误判为冲突）。**它已是被污染的开发集**——"
-               "正式调参前请按 70/30 切分 dev/held-out，另建留出集，且留出集不得用于修 bug。", "",
-               "## 已知缺口（不进门禁，单列）", "",
-               "- HashEmbedding 为词法级占位实现，改写问法的召回质量显著低于真实语义模型；",
+               "## 污染声明与校准协议", "",
+               "dev 集在开发过程中用于发现并修复：多值谓语冲突误判、中文关键词通道"
+               "切词缺失、摘要置信度继承缺陷、G4 门禁顺序效应——**它已是被污染的开发集**。",
+               "held-out 在 v0.2.0 发布前跑了一次基线（默认参数），下次发布前需重建。",
+               "正式调参用 scripts/calibrate.py：dev 上单维扫参，选型后 held-out 终验一次。",
+               "", "## 已知缺口（不进门禁，单列）", "",
+               "- HashEmbedding 为词法级占位实现（本报告默认），跨措辞召回显著低于"
+               "真实语义模型（对照数字见 docs/04 §I）；",
                "- 图游走为简化 PPR（2 跳衰减），未与真 PPR/Neo4j 对照；",
-               "- 多用户并发与 PG 后端下的检索延迟未在本报告覆盖（见 docs/04）。"]
+               "- 多用户并发与 PG 后端下的检索延迟未在本报告覆盖（见 docs/04 §H）。"]
     out = ROOT / "docs" / "eval-report.md"
     out.write_text("\n".join(report), encoding="utf-8")
     print(f"\n报告已写入 {out}")
-    print(f"== 门禁：{len(gates) - fails}/{len(gates)} PASS ==")
-    return 1 if fails else 0
+    print(f"== 门禁：{len(gates) - gate_fails}/{len(gates)} PASS | "
+          f"查询探针[{label}] {acc:.3f} ==")
+    return 1 if gate_fails else 0
 
 
 if __name__ == "__main__":
