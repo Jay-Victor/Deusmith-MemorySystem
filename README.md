@@ -12,18 +12,16 @@ pgvector 语义召回 + 图游走双路检索，证据驱动的可信度与冲�
 
 | 文件 | 内容 |
 |---|---|
-| `docs/00-review.md` | 对原方案的逐条评审（判定表 + 三个最贵错误 + 只做三件事） |
-| `docs/01-architecture.md` | 架构：不变量 I1–I10、分层、数据模型、参数耦合、读写离线三路径、演进触发 |
 | `docs/02-schema.sql` | PostgreSQL DDL（约束/索引/触发器/函数；与 `src/deusmith/schema.sql` 逐字节一致） |
 | `docs/03-params.yaml` | 参数表（7 个 tunable 维度，`check_params.py` 保证与代码零漂移） |
-| `docs/04-numeric-examples.md` | 数值演算（m102 勘误 +11.8%）· 衰减曲线 · PG 延迟实测 · 边界表 · 嵌入基线 |
-| `docs/eval-report.md` | 七类探针门禁 7/7 + 查询探针（dev/held-out 切分）+ 坏变体对照 |
-| `assets/deusmith-architecture.html` | 架构图（主题变量 HTML） |
 | `src/deusmith/` | 实现：`params` `models` `algos` `embeddings` `llm` `store` `shallow` `pipeline` `offline` `evidence` `retryhttp` + schema.sql |
 | `tests/`（216 项） | 单测 + 真 PG 集成（池化/会话/证据/时序/追踪）+ API mock 服务器 |
 | `scripts/` | `check_params` `check_sql` `eval_probes` `calibrate` `bench_pg` `init_db` |
 | `.github/workflows/ci.yml` | CI：pgvector 服务容器跑全量验证 |
 | `demo.py` | `--selftest`（25 项边界断言）/ `--demo`（全部数值表） |
+
+> 设计与过程文档（原方案、评审、架构、数值演算、评估报告、架构图）保留在本地
+> 工作目录（已 gitignore），不随仓库分发；历史版本封存于 git 标签 `v0.1.0` / `v0.2.0`。
 
 ## 快速开始
 
@@ -103,7 +101,7 @@ report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run("tenant0/user1")
 本地语义模型（已验证路径）：`pip install sentence-transformers` 后配置
 `embedding.provider=local`、`model_name` 指向模型目录（如项目内
 `bge-small-zh-v1.5/`，bge 系需带 `query_prefix`）。实测
-bge-small-zh-v1.5 相比词法哈希：dev 查询探针 0.571 → 0.714（+14.3pp，见 docs/04 §I）。
+bge-small-zh-v1.5 相比词法哈希：dev 查询探针 0.571 → 0.714（+14.3pp）。
 
 ## 阶段二能力（v0.2.0）
 
@@ -128,11 +126,11 @@ print(mem.explain_score(node_id))        # weight/recency/conf 因子分解
 print(mem.slot_history("user", "住在"))  # 时序版本链
 ```
 
-## 关键设计（详见 docs/00 评审与 docs/01 架构）
+## 关键设计
 
 - **冲突判定用槽位身份+极性，不用相似度**：实测否定句（"我不再喜欢摄影了"）与原句
   余弦相似度 0.56–0.74，高于多数良性改写——任何能合并良性改写的相似度阈值必然吞掉
-  否定更新；槽位+极性判定零丢失（docs/eval-report.md）。
+  否定更新；槽位+极性判定零丢失（对照实验见本地文档或 git 标签）。
 - **绝对刻度打分**：RRF 融合除以"全通道第一"参考点，rel 与查询无关，
   "score<0.45 视为没记住"这类阈值可跨查询移植。
 - **深层只可废止**：DB 触发器拦截 DELETE/内容 UPDATE，变更走版本链+审计；
@@ -150,11 +148,11 @@ print(mem.slot_history("user", "住在"))  # 时序版本链
 
 ```
 Deusmith-MemorySystem/
-├── docs/            00 评审 · 01 架构 · 02 schema · 03 参数 · 04 数值 · eval-report
+├── docs/            02 schema · 03 参数（其余设计文档本地保留，不进仓库）
 ├── src/deusmith/    params models algos embeddings llm store shallow pipeline offline + schema.sql
-├── tests/           164 项（含真 PG 集成，无库自动 skip）
-├── scripts/         check_params check_sql eval_probes bench_pg
-├── assets/          架构图 HTML
+├── tests/           219 项（含真 PG 集成，无库自动 skip）
+├── scripts/         check_params check_sql eval_probes calibrate bench_pg init_db
+├── .github/         CI（pgvector 容器）
 ├── demo.py          --selftest / --demo
 └── config.example.json
 ```
