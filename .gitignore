@@ -25,6 +25,5 @@ assets/
 tests/
 scripts/
 demo.py
-.github/
 pyrightconfig.json
 docs/
