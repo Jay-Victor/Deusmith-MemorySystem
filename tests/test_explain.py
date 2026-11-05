@@ -42,7 +42,7 @@ class TestExplain(unittest.TestCase):
         m = make_mem()
         nodes = m.write(m.session("s1"), "我喜欢摄影。")
         ex = m.explain_score(nodes[0].id)
-        for key in ("weight", "recency", "confidence", "importance", "tier_boost"):
+        for key in ("weight", "recency", "confidence", "importance", "activation_count"):
             self.assertIn(key, ex["factors"])
         self.assertGreater(ex["score_at_full_rel"], 0)
         self.assertLessEqual(ex["score_at_full_rel"], 1.0)

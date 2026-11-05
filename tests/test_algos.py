@@ -135,21 +135,46 @@ class TestEstimateConfidence(unittest.TestCase):
 
 
 class TestRetrievalScore(unittest.TestCase):
-    def test_all_ones_scores_tier_boost(self):
+    def test_all_ones_scores_one(self):
         from deusmith.algos import retrieval_score
         n = mk_node(weight=1.0, confidence=1.0, importance=1.0,
                     last_access_at=NOW)
         self.assertAlmostEqual(retrieval_score(1.0, n, NOW), 1.0, places=9)
 
+    def test_tier_not_in_ranking(self):
+        """tier 不进相关性排序（技能库：生命周期标记不进排序）——
+        tier 管留存/晋升/注入段位，不管排序；shallow 惩罚会打死同会话连续性。"""
+        from deusmith.algos import retrieval_score
+        shallow = mk_node(tier=Tier.shallow, weight=1.0, confidence=1.0,
+                          importance=1.0, last_access_at=NOW)
+        deep = mk_node(tier=Tier.deep, weight=1.0, confidence=1.0,
+                       importance=1.0, last_access_at=NOW)
+        self.assertAlmostEqual(retrieval_score(1.0, shallow, NOW),
+                               retrieval_score(1.0, deep, NOW), places=9)
+
     def test_m102_score_pinned(self):
-        """rel=0.8, weight=0.6, recency=0.7113, conf=0.9, imp=0.8, 中层 → 0.3489。
-        文档值 0.39 = 漏乘 0.8^0.5。"""
+        """rel=0.8, weight=0.6, recency=0.7113, conf=0.9, imp=0.8, 中层 → 0.4082。
+        v0.2.1 起 recency 因子有界化：(1-span)+span·rec^γ，span=0.25
+        （技能库：R 管忘没忘不管排不排序，无界衰减会压死陈旧偏好）。"""
         from deusmith.algos import retrieval_score
         n = mk_node(weight=0.6, confidence=0.9, importance=0.8,
                     last_access_at=NOW - timedelta(days=7),
                     activation_count=3, emotion=0.5)
         s = retrieval_score(0.8, n, NOW)
-        self.assertAlmostEqual(s, 0.3489, places=3)
+        self.assertAlmostEqual(s, 0.4082, places=3)
+
+    def test_recency_factor_bounded_and_weak(self):
+        """10 年未访问的同条件记忆，得分不应低于新鲜记忆的 70%
+        （时效有界弱化：压排序的是相关性，不是年龄）。"""
+        from deusmith.algos import retrieval_score
+        fresh = mk_node(weight=0.6, confidence=0.9, importance=0.8,
+                        last_access_at=NOW)
+        stale = mk_node(weight=0.6, confidence=0.9, importance=0.8,
+                        last_access_at=NOW - timedelta(days=3650))
+        s_fresh = retrieval_score(0.8, fresh, NOW)
+        s_stale = retrieval_score(0.8, stale, NOW)
+        self.assertGreater(s_fresh, s_stale)                 # 仍然单调
+        self.assertGreaterEqual(s_stale / s_fresh, 0.70)     # 但有界
 
     def test_factor_floor_prevents_zero_score(self):
         from deusmith.algos import retrieval_score
@@ -163,23 +188,17 @@ class TestRetrievalScore(unittest.TestCase):
         self.assertEqual(retrieval_score(0.9, n, NOW, allowed_sensitivity=2), 0.0)
         self.assertGreater(retrieval_score(0.9, n, NOW, allowed_sensitivity=3), 0.0)
 
-    def test_tier_boost_ordering_applies(self):
-        from deusmith.algos import retrieval_score
-        shallow = mk_node(tier=Tier.shallow, weight=1.0, confidence=1.0, importance=1.0)
-        deep = mk_node(tier=Tier.deep, weight=1.0, confidence=1.0, importance=1.0)
-        self.assertGreater(retrieval_score(1.0, deep, NOW), retrieval_score(1.0, shallow, NOW))
-
 
 class TestRRFFusion(unittest.TestCase):
     def test_first_in_all_channels_is_exactly_one(self):
-        """绝对参考点（不变量 I4）：全通道第一 → rel=1.0，与查询无关。"""
+        """绝对参考点（不变量 I4）：全通道第一 → rel=1.0，与查询无关。
+        常驻通道（explicit）不参与融合——常驻记忆无条件注入，不进排序。"""
         from deusmith.algos import rrf_fuse
         rankings = {
             "vector": ["m1", "m2", "m3"],
             "graph": ["m1", "m3"],
             "keyword": ["m1", "m2"],
             "recent": ["m1"],
-            "explicit": ["m1"],
         }
         rel = rrf_fuse("m1", rankings)
         self.assertAlmostEqual(rel, 1.0, places=9)

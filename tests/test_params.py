@@ -55,11 +55,10 @@ class TestScoreDefaults(unittest.TestCase):
         self.assertEqual(p.score.mmr_lambda, 0.7)
         self.assertEqual(p.score.factor_floor, 0.01)
 
-    def test_tier_boost_ordering(self):
+    def test_tier_not_a_ranking_factor(self):
+        """tier_boost 已从打分公式移除（v0.2.1）：tier 管留存与注入段位，不进排序。"""
         from deusmith.params import Params
-        tb = Params().score.tier_boost
-        self.assertLess(tb["shallow"], tb["middle"])
-        self.assertLess(tb["middle"], tb["deep"])
+        self.assertFalse(hasattr(Params().score, "tier_boost"))
 
 
 class TestRetrievalDefaults(unittest.TestCase):
@@ -109,6 +108,23 @@ class TestTunableDims(unittest.TestCase):
         from deusmith.params import TUNABLE_DIMS, MAX_TUNABLE_DIMS
         self.assertLessEqual(len(TUNABLE_DIMS), MAX_TUNABLE_DIMS)
         self.assertEqual(len(set(TUNABLE_DIMS)), len(TUNABLE_DIMS))
+
+
+class TestStageTwoParams(unittest.TestCase):
+    def test_channel_weights_no_explicit(self):
+        """常驻通道（explicit）不参与 RRF 融合（技能库 §4：常驻节点会在
+        所有查询里排第一，挤掉真正相关的内容）；常驻记忆走无条件注入。"""
+        from deusmith.params import Params
+        cw = Params().retrieval.channel_weights
+        self.assertNotIn("explicit", cw)
+        for w in cw.values():
+            self.assertGreaterEqual(w, 0)
+
+    def test_recency_span(self):
+        from deusmith.params import Params
+        sp = Params().score
+        self.assertEqual(sp.recency_span, 0.25)   # 有界弱时效：(1-s)+s·rec^γ
+        self.assertLess(sp.recency_span, 0.5)
 
 
 if __name__ == "__main__":

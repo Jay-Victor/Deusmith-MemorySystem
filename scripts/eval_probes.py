@@ -117,11 +117,14 @@ def build_scenario(embedder=None, params=None):
     now = utcnow()
 
     def put(content, days_ago, type_=NodeType.event, **over):
+        # conf 默认 0.8：与 write 路径产出一致（source_auth=0.8, ev=1 →
+        # estimate_confidence≈0.85）。场景直接造节点时若沿用模型默认 0.5，
+        # 会与真实管线写入的节点不在同一置信基线上，排序对比失真。
         kw = dict(
             type=type_, content=content, scope=SCOPE, tier=Tier.middle,
             embedding_model=emb.model_name, content_vector=emb.embed(content),
             last_access_at=now - timedelta(days=days_ago), weight=0.5,
-            importance=0.5)
+            importance=0.5, confidence=0.8)
         kw.update(over)
         store.upsert_node(MemoryNode(**kw))
 
@@ -148,7 +151,8 @@ def build_scenario(embedder=None, params=None):
         type=NodeType.identity_policy, content="用户名叫李雷，是一名后端工程师",
         scope=SCOPE, tier=Tier.deep, embedding_model=emb.model_name,
         content_vector=emb.embed("用户名叫李雷，是一名后端工程师"),
-        human_confirmed=True, evidence_refs=("ev_profile_1",), importance=0.95))
+        human_confirmed=True, evidence_refs=("ev_profile_1",), importance=0.95,
+        confidence=0.9))
     # G7 显式记住（走写入路径）
     mem.write(mem.session("probe-s1"), "请记住：我对花粉过敏。")
     # G2 纠正（高权威）
@@ -169,7 +173,8 @@ def run_query_probes(mem, emb, probes):
     s = mem.session("probe-queries")
     results = []
     for pid, q, expect in probes:
-        res = mem.retrieve(s, q, topk=5)
+        # 评估模式关闭命中强化：探针测的是冷启动排序质量，不是先发优势滚雪球
+        res = mem.retrieve(s, q, topk=5, reinforce_hits=False)
         tops = [n.content for n, _, _ in res.selected[:3]]
         hit = any(expect in c for c in tops)
         results.append((pid, hit, f"top1={tops[0][:16] if tops else '∅'}"))
@@ -203,12 +208,13 @@ def run_gates(mem: DeusmithMemory, emb: HashEmbedding) -> list[tuple[str, bool, 
     ok = any("京都" in t for t in tops)
     gates.append(("G3 连续性：同会话上下文召回", bool(ok), "；".join(tops)[:60]))
 
-    # G5 常驻通道
-    res = mem.retrieve(s, "今天天气怎么样")
-    tops = top_contents(res, 8)
-    ok = any("李雷" in t for t in tops) and any("花粉" in t for t in tops)
-    gates.append(("G5 常驻通道：身份与显式记忆无条件召回", bool(ok),
-                  f"含李雷={any('李雷' in t for t in tops)}, 含花粉={any('花粉' in t for t in tops)}"))
+    # G5 常驻通道（改为注入语义：常驻记忆不进排序，注入时无条件可见）
+    out5 = mem.inject_context(s, "今天天气怎么样")
+    has_lilei = "李雷" in out5["system"] or "李雷" in out5["user"]
+    has_pollen = "花粉" in out5["user"]
+    ok = has_lilei and has_pollen
+    gates.append(("G5 常驻通道：身份与显式记忆注入可见", bool(ok),
+                  f"system含李雷={'李雷' in out5['system']}, user含花粉={has_pollen}"))
 
     # G6 无关精度（绝对刻度）
     res = mem.retrieve(s, "火锅底料的炒制方法")

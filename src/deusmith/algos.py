@@ -167,10 +167,11 @@ def retrieval_score(rel_norm: float, node: MemoryNode, now: datetime,
     if node.sensitivity > allowed_sensitivity:
         return 0.0
     rec = decay_recency(node, now, params)
-    tier = node.tier.value if hasattr(node.tier, "value") else str(node.tier)
-    boost = sp.tier_boost.get(tier, 1.0)
+    boost = 1.0
     if node.valid_to is not None and node.valid_to <= now:
         boost *= sp.historical_penalty   # 过期事实降权（双时间，§三）
+    # 时效因子有界弱化（v0.2.1）：(1-span)+span·rec^γ ∈ [1-span, 1]
+    rec_factor = (1.0 - sp.recency_span) + sp.recency_span * rec ** sp.gamma
 
     def clip01(v: float) -> float:
         return min(1.0, max(sp.factor_floor, v))
@@ -178,7 +179,7 @@ def retrieval_score(rel_norm: float, node: MemoryNode, now: datetime,
     return (
         clip01(rel_norm) ** sp.alpha
         * clip01(node.weight) ** sp.beta
-        * clip01(rec) ** sp.gamma
+        * rec_factor
         * clip01(node.confidence) ** sp.delta
         * clip01(node.importance) ** sp.epsilon
         * boost

@@ -142,34 +142,45 @@ class OpenAICompatibleEmbedding:
 
 
 class LocalModelEmbedding:
-    """本地 sentence-transformers 模型（可选依赖）。
+    """本地 sentence-transformers 模型（可选依赖，惰性加载）。
 
     query_prefix：bge 系检索模型查询侧指令（如
     "为这个句子生成表示以用于检索相关文章："），文档侧不加。
+    模型在首次 embed 时才加载（构造便宜，provider 选择不触碰网络/磁盘）。
     """
 
     def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5",
                  query_prefix: str = ""):
-        try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
-        except ImportError as e:
-            raise ImportError(
-                "local provider 需要 sentence-transformers："
-                "pip install sentence-transformers") from e
-        self._model = SentenceTransformer(model_name)
+        self._model = None
+        self._model_name = model_name
         self.model_name = model_name
         self.query_prefix = query_prefix
-        self.dim = self._model.get_sentence_embedding_dimension()
+        self.dim = None
+
+    def _ensure_model(self):
+        if self._model is None:
+            try:
+                from sentence_transformers import SentenceTransformer  # type: ignore
+            except ImportError as e:
+                raise ImportError(
+                    "local provider 需要 sentence-transformers："
+                    "pip install sentence-transformers") from e
+            self._model = SentenceTransformer(self._model_name)
+            self.dim = self._model.get_sentence_embedding_dimension()
+        return self._model
 
     def embed(self, text: str) -> tuple:
-        return tuple(float(x) for x in self._model.encode([text])[0])
+        model = self._ensure_model()
+        return tuple(float(x) for x in model.encode([text])[0])
 
     def embed_query(self, text: str) -> tuple:
+        model = self._ensure_model()
         return tuple(float(x) for x in
-                     self._model.encode([self.query_prefix + text])[0])
+                     model.encode([self.query_prefix + text])[0])
 
     def embed_batch(self, texts):
-        return [tuple(float(x) for x in v) for v in self._model.encode(list(texts))]
+        model = self._ensure_model()
+        return [tuple(float(x) for x in v) for v in model.encode(list(texts))]
 
 
 def get_provider(cfg: dict):

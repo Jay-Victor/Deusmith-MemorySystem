@@ -287,7 +287,8 @@ class DeusmithMemory:
         return sorted(terms)[:8]
 
     def retrieve(self, session: ShallowSession, query: str, topk: int = 8,
-                 trace_id: str | None = None) -> RetrievalResult:
+                 trace_id: str | None = None, reinforce_hits: bool = True
+                 ) -> RetrievalResult:
         now = utcnow()
         trace_id = trace_id or ("tr_" + uuid.uuid4().hex[:10])
         qvec = self.embedder.embed_query(query)     # 查询侧嵌入（bge 类带指令前缀）
@@ -306,21 +307,29 @@ class DeusmithMemory:
                 self.scope, seed_ids, hops=rp.graph_hops, max_expand=100)
             graph_scores = self._walk_scores(seed_ids, seed_sims, edges,
                                              rp.ppr_damping)
-        kw_rank: dict[str, int] = {}
+        # keyword 通道：只收稀有 term（df<10）。通用二元组（"用户"命中全部节点）
+        # 的排名与查询语义无关，进 RRF 会让高频节点在所有"用户…"查询里拿名次分
+        # （RRF 只看名次不看分差）。连续性由浅层会话投影承担，recent 不进融合。
+        kw_scores: dict[str, float] = {}
         for term in self._keyword_terms(query):
-            for n in self.store.keyword_search(self.scope, term, limit=10,
-                                               allowed_sensitivity=self.allowed_sensitivity):
-                if n.id not in kw_rank:
-                    kw_rank[n.id] = len(kw_rank) + 1
+            hits = self.store.keyword_search(self.scope, term, limit=10,
+                                             allowed_sensitivity=self.allowed_sensitivity)
+            if len(hits) >= 10:
+                continue          # 通用词（df 触顶）：不参与关键词通道
+            if not hits:
+                continue
+            w = 1.0 / len(hits)
+            for n in hits:
+                kw_scores[n.id] = kw_scores.get(n.id, 0.0) + w
         recent = self.store.recent_active(self.scope, 20)
-        resident = self.store.resident_nodes(self.scope)
 
+        # 四路召回融合（vector/graph/keyword/recent）。常驻通道（explicit）不进
+        # 排序：常驻记忆无条件注入（inject_context 的 [常驻记忆] 段），不靠相关性。
         rankings = {
             "vector": vector_rank,
             "graph": sorted(graph_scores, key=graph_scores.get, reverse=True),
-            "keyword": sorted(kw_rank, key=kw_rank.get),
+            "keyword": sorted(kw_scores, key=kw_scores.get, reverse=True),
             "recent": [n.id for n in recent],
-            "explicit": [n.id for n in resident],
         }
 
         # ---- 候选收集 + 敏感门控（I10）+ 状态门控
@@ -328,10 +337,12 @@ class DeusmithMemory:
         #   回到候选池，必须在此统一拦截，否则被替代的旧值重新参选）
         candidates: dict[str, MemoryNode] = {}
         filtered_reasons: list[str] = []
+        seen_ids: set = set()
         for ids in rankings.values():
             for nid in ids:
-                if nid in candidates:
+                if nid in candidates or nid in seen_ids:
                     continue
+                seen_ids.add(nid)
                 node = self.store.get_node(nid)
                 if node is None:
                     continue
@@ -358,10 +369,11 @@ class DeusmithMemory:
         selected = [(n, s, r) for n, s, r in scored if n.id in pick_ids]
         selected.sort(key=lambda x: x[1], reverse=True)
 
-        # ---- 命中强化（§二.2 检索触发）
-        for node, _, _ in selected:
-            reinforce(node, signal_strength=0.5, now=now, params=self.params)
-            self.store.upsert_node(node)
+        # ---- 命中强化（§二.2 检索触发；评估模式可关闭以测冷启动排序）
+        if reinforce_hits:
+            for node, _, _ in selected:
+                reinforce(node, signal_strength=0.5, now=now, params=self.params)
+                self.store.upsert_node(node)
 
         conflict_flags = [n.id for n, _, _ in selected
                           if n.status == NodeStatus.contested]
@@ -410,8 +422,16 @@ class DeusmithMemory:
                     and node.sensitivity <= self.allowed_sensitivity):
                 system_parts.append(node.content)
 
-        # user 段：按分数排序的相关记忆；争议只注入冲突提示（按槽位去重）
-        user_parts: list[str] = []
+        # user 段开头：常驻记忆无条件注入（不进 RRF 排序，技能库 §4）。
+        # 深层身份已在 system 段；此处是 explicit_remember 的中层记忆，限量 5。
+        resident_parts: list[str] = []
+        for node in self.store.resident_nodes(self.scope):
+            if (node.tier != Tier.deep and node.status == NodeStatus.active
+                    and node.sensitivity <= self.allowed_sensitivity):
+                resident_parts.append(f"[常驻记忆] {node.content}")
+
+        # user 段：常驻 → 冲突提示 → 按分数排序的相关记忆（争议按槽位去重）
+        user_parts: list[str] = list(resident_parts[:5])
         hinted_slots: set = set()
         for node, score, _ in res.selected:
             if node.status == NodeStatus.contested:
@@ -527,7 +547,6 @@ class DeusmithMemory:
                 "confidence": round(n.confidence, 4),
                 "importance": round(n.importance, 4),
                 "activation_count": n.activation_count,
-                "tier_boost": self.params.score.tier_boost.get(n.tier.value),
                 "valid_to": n.valid_to.isoformat() if n.valid_to else None,
             },
             "score_at_full_rel": round(

@@ -38,12 +38,11 @@ score.gamma: 0.6                    # recency 指数
 score.delta: 1.0                    # confidence 指数
 score.epsilon: 0.5                  # importance 指数
 score.factor_floor: 0.01            # 每因子下限（I4 防零）
+score.recency_span: 0.25            # 时效有界弱化：(1-s)+s·rec^γ ∈ [1-s,1]
 score.mmr_lambda: 0.7               # tunable[score.mmr_lambda] MMR 相关性-多样性折衷
 score.min_score_threshold: 0.45     # 绝对下限：低于此视为"没记住"
 score.historical_penalty: 0.5       # 已过期（valid_to<now）记忆的检索降权
-score.tier_boost.shallow: 0.8
-score.tier_boost.middle: 1.0
-score.tier_boost.deep: 1.15
+# 注：tier_boost 已移除（v0.2.1）——tier 管留存/晋升/注入段位，不进排序
 
 # ---- 召回与融合（§六.1/六.2）
 retrieval.topk_recall: 50           # tunable[retrieval.recall] 向量召回 K
@@ -55,8 +54,9 @@ retrieval.rrf_k: 60                 # RRF 平滑常数
 retrieval.channel_weights.vector: 1.0
 retrieval.channel_weights.graph: 0.8
 retrieval.channel_weights.keyword: 0.6
-retrieval.channel_weights.recent: 0.5
-retrieval.channel_weights.explicit: 1.0
+retrieval.channel_weights.recent: 0.0   # v0.2.1 移出融合：recent 按访问序与查询无关，
+                                        # 连续性由浅层会话投影（inject user 段）承担
+# 常驻通道（explicit）不参与融合：常驻记忆无条件注入，不进相关性排序
 
 # ---- 分层与流转（§二）
 tier.shallow_window_rounds: 10      # 最近 N 轮原文

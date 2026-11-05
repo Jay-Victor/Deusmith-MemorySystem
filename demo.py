@@ -62,8 +62,8 @@ def selftest() -> int:
     score = retrieval_score(0.8, n, NOW, params=P)
     ck("m102: S=2.9359", abs(S - 2.9359) < 5e-4, f"S={S:.4f}")
     ck("m102: recency=0.7113", abs(rec - 0.7113) < 5e-4, f"recency={rec:.4f}")
-    ck("m102: score=0.3489（文档值 0.39 漏乘 importance^ε）",
-       abs(score - 0.3489) < 5e-4, f"score={score:.4f}")
+    ck("m102: score=0.4082（v0.2.1 时效有界化后；原公式 0.3489）",
+       abs(score - 0.4082) < 5e-4, f"score={score:.4f}")
 
     # ---- 衰减边界
     ck("Δt=0 → recency=1", decay_recency(mk(last_access_at=NOW), NOW, P) == 1.0)
@@ -153,19 +153,20 @@ def demo() -> int:
     rec = decay_recency(n, NOW, P)
     sp = P.score
     f_rel, f_w = 0.8 ** sp.alpha, n.weight ** sp.beta
-    f_rec, f_c = rec ** sp.gamma, n.confidence ** sp.delta
+    rec_factor = (1 - sp.recency_span) + sp.recency_span * rec ** sp.gamma
+    f_c = n.confidence ** sp.delta
     f_i = n.importance ** sp.epsilon
     score = retrieval_score(0.8, n, NOW, params=P)
     print("A. m102 数值演算（Δt=7天, imp=0.8, emo=0.5, conf=0.9, act=3, w=0.6, rel=0.8）")
     print(f"   S = 1 + 0.8×0.8 + 0.5×0.5 + 0.7×0.9 + 0.3×ln(4) = {S:.4f}")
     print(f"   τ_eff = 7 × S = {tau:.4f} 天")
     print(f"   recency = exp(-7/τ_eff) = {rec:.4f}")
-    print(f"   因子分解：rel^α={f_rel:.4f}  weight^β={f_w:.4f}  recency^γ={f_rec:.4f}  "
-          f"conf^δ={f_c:.4f}  imp^ε={f_i:.4f}  tier_boost=1.00")
+    print(f"   因子分解：rel^α={f_rel:.4f}  weight^β={f_w:.4f}  "
+          f"rec_factor=(1-0.25)+0.25·rec^γ={rec_factor:.4f}  "
+          f"conf^δ={f_c:.4f}  imp^ε={f_i:.4f}")
     print(f"   score = {score:.4f}")
-    print(f"   【勘误】原文档写 ≈0.39 —— 该值恰好是漏乘 imp^ε={f_i:.4f} 后的积 "
-          f"{f_rel * f_w * f_rec * f_c:.4f}；完整公式={score:.4f}，相对误差 "
-          f"{(0.39 - score) / score * 100:+.1f}%")
+    print(f"   【勘误】原文档写 ≈0.39 —— 原公式（无界 rec^γ）复算={f_rel * f_w * rec ** sp.gamma * f_c * f_i:.4f}；"
+          f"v0.2.1 时效有界化后={score:.4f}")
 
     # ---- B. 衰减曲线
     print(f"\n{line}\nB. 遗忘衰减曲线 recency=exp(-Δt/(7·S))")

@@ -10,4 +10,7 @@ build/
 data/
 logs/
 pg/
+bge-small-zh-v1.5/
+models/
 .DS_Store
+bge-small-zh-v1.5/

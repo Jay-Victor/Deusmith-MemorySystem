@@ -133,15 +133,12 @@ def main() -> int:
                     + c.w_freshness) >= 2.197,
           f"gain={c.gain}，输入上限={c.gain * 0.9:.2f}（需 ≥2.197 才能到 0.9）")
 
-    tb = p.score.tier_boost
-    check("tier_boost 严格递增 shallow<middle<deep",
-          tb["shallow"] < tb["middle"] < tb["deep"],
-          f"{tb['shallow']}<{tb['middle']}<{tb['deep']}")
-
     check("打分指数全部非负", all(v >= 0 for v in
           (p.score.alpha, p.score.beta, p.score.gamma, p.score.delta, p.score.epsilon)))
     check("factor_floor > 0（I4 防零）", p.score.factor_floor > 0)
     check("MMR λ∈[0,1]", 0 <= p.score.mmr_lambda <= 1)
+    check("recency_span∈(0,0.5)（时效有界弱化）",
+          0 < p.score.recency_span < 0.5)
     check("通道权重全部非负", all(w >= 0 for w in p.retrieval.channel_weights.values()))
 
     t = p.tier

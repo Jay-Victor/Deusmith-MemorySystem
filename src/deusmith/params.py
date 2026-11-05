@@ -76,12 +76,15 @@ class ScoreParams:
     delta: float = 1.0    # confidence 指数
     epsilon: float = 0.5  # importance 指数
     factor_floor: float = 0.01   # 每因子下限，防零（不变量 I4）
+    # 时效因子有界弱化（v0.2.1）：factor = (1-span) + span·rec^γ。
+    # 无界 rec^γ 会把 40 天前的偏好压成 1/6 分，让"今天的花粉过敏"压过
+    # "讨厌加班"（实测）；R 管忘没忘，不管排不排序——压排序的是相关性。
+    recency_span: float = 0.25
     mmr_lambda: float = 0.7
-    tier_boost: dict = field(default_factory=lambda: {
-        "shallow": 0.8, "middle": 1.0, "deep": 1.15,
-    })
     min_score_threshold: float = 0.45  # 绝对下限：低于此视为"没记住"
     historical_penalty: float = 0.5    # 已过期（valid_to<now）记忆的检索降权
+    # 注：tier_boost 已移除（v0.2.1）——tier 管留存/晋升/注入段位，不进排序；
+    # shallow 惩罚 0.8 会打死同会话连续性（"刚才聊的"召不回）。
 
 
 @dataclass(frozen=True)
@@ -92,9 +95,11 @@ class RetrievalParams:
     knn_edge_topk: int = 20
     token_budget: int = 4000
     rrf_k: int = 60
-    # 多路融合通道权重（向量/图/关键词/最近访问/显式引用），和不必为 1（RRF 归一在分母）
+    # 多路融合通道权重（向量/图/关键词/最近访问），和不必为 1（RRF 归一在分母）。
+    # 常驻通道（explicit）不参与融合：常驻记忆无条件注入，不进相关性排序
+    # （技能库 §4：常驻节点会在所有查询里排第一，挤掉真正相关的内容）。
     channel_weights: dict = field(default_factory=lambda: {
-        "vector": 1.0, "graph": 0.8, "keyword": 0.6, "recent": 0.5, "explicit": 1.0,
+        "vector": 1.0, "graph": 0.8, "keyword": 0.6, "recent": 0.0,
     })
     # 绝对参考点：全部通道均排第一时的 RRF 融合值（归一分母，不变量 I4）
     # max_fused = sum(w_ch) / (rrf_k + 1)
