@@ -21,3 +21,10 @@ docs/01-architecture.md
 docs/04-numeric-examples.md
 docs/eval-report.md
 assets/
+# 开发资产（本地保留，不进仓库；完整历史在 v0.1.0/v0.2.0 标签）
+tests/
+scripts/
+demo.py
+.github/
+pyrightconfig.json
+docs/
