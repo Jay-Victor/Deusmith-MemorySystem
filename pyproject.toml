@@ -13,11 +13,13 @@ dependencies = [
 
 [project.optional-dependencies]
 local = ["sentence-transformers>=2.7"]
+tui = ["textual>=1.0"]
 dev = []
 
 [project.scripts]
 deusmith = "deusmith.console:main"
 deusmith-web = "deusmith.webconsole:main"
+deusmith-tui = "deusmith.tui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

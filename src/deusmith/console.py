@@ -570,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--smoke", action="store_true", help="自检模式（CI/回归用）")
     ap.add_argument("--web", action="store_true",
                     help="启动可视化 Web 控制台（代替 REPL）")
+    ap.add_argument("--tui", action="store_true",
+                    help="启动终端 TUI（需 pip install deusmith-memory[tui]）")
     ap.add_argument("--port", type=int, default=8765, help="--web 端口（默认 8765）")
     ap.add_argument("cmd", nargs="*", help="一次性命令及参数（省略则进 REPL）")
     args = ap.parse_args(argv)
@@ -585,6 +587,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.memory:
             wargv.append("--memory")
         return web_main(wargv)
+
+    if args.tui:
+        from .tui import main as tui_main
+        targv = ["--scope", args.scope]
+        if args.config:
+            targv += ["--config", args.config]
+        if args.memory:
+            targv.append("--memory")
+        return tui_main(targv)
 
     try:
         cfg = load_config(args.config)

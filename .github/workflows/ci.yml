@@ -34,6 +34,10 @@ jobs:
       - name: Web console smoke (HTTP API + page)
         run: |
           python -m deusmith.webconsole --smoke
+      - name: TUI smoke (textual, optional extra)
+        run: |
+          pip install -e '.[tui]'
+          python -m deusmith.tui --smoke
       - name: End-to-end smoke (write -> retrieve -> inject)
         run: |
           python -c "
