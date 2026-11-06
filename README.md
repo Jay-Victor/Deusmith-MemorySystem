@@ -49,21 +49,33 @@ report = OfflineGovernor(mem.store, mem.embedder, mem.llm).run("tenant0/user1")
 # 离线治理：边衰减/剪枝/环路消解/压缩合并/层级流转/权重防垄断(Gini)/一致性审计
 ```
 
-## 控制台（CLI / REPL）
+## 控制台（CLI / REPL / Web 可视化）
 
 ```bash
-pip install -e .            # 提供 deusmith 入口点（也可 python -m deusmith.console）
+pip install -e .            # 提供 deusmith / deusmith-web 入口点（也可 python -m deusmith.console）
 
 deusmith                    # 交互 REPL（无 config.json 时内存模式，零依赖可跑）
 deusmith --memory write "请记住：我对花粉过敏。"      # 一次性命令
 deusmith --scope tenant0/user1 search "过敏" -k 5    # PG 后端跨进程检索
+deusmith web                # REPL 内启动可视化控制台（后台线程）
+deusmith --web --port 9000  # 直接启动可视化控制台
+deusmith-web                # 同上（独立入口点）
 deusmith --smoke            # 自检（CI 用）
 ```
 
 REPL 命令：`write` 写入 → `search` 检索（得分/rel/精排明细）→ `inject` 上下文注入
 → `tiers` 三层分布 → `node/slot/why/explain` 全参数与可解释性 → `stats` 基尼与事件
-→ `forget <id>` 单条遗忘曲线与归档期限 → `govern` 离线治理 → `config` 生效配置。
-配置文件：`--config` / `$DEUSMITH_CONFIG` / `./config.json`（模板 `config.example.json`）。
+→ `forget <id>` 单条遗忘曲线与归档期限 → `govern` 离线治理 → `web` 可视化控制台
+→ `config` 生效配置。配置文件：`--config` / `$DEUSMITH_CONFIG` / `./config.json`
+（模板 `config.example.json`）。
+
+**Web 可视化控制台**（`deusmith-web`，零第三方依赖，默认 `http://127.0.0.1:8765`）：
+
+- 写入（来源权威可调）/ 检索（score·rel·精排明细）/ 注入预览（system·user·tool 三段 + 预算降级）
+- 记忆浏览器：tier/status/文本过滤，节点全参数抽屉 + explain 因子分解
+- 遗忘曲线：`exp(−Δt/τ_eff)` 实测曲线 + 冷/热参考 + θ 归档阈值 + 归档期限标记
+- 记忆图谱：力导向布局（颜色=层级，大小=权重，边色=类型），点选高亮邻居
+- 槽位版本链（双时间窗口）/ 事件流 / 离线治理报告 / scope 在线切换
 
 ## 能力一览
 
@@ -108,9 +120,10 @@ bge-small-zh-v1.5 相比词法哈希 dev 查询探针 0.571 → 0.714（+14.3pp�
 ```
 Deusmith-MemorySystem/
 ├── src/deusmith/     核心实现：params models algos embeddings rerank llm store
-│                     shallow pipeline offline evidence retryhttp console + schema.sql
+│                     shallow pipeline offline evidence retryhttp console
+│                     webconsole + schema.sql + web/index.html（可视化前端）
 ├── config.example.json
-├── pyproject.toml    # deusmith = deusmith.console:main 入口点
+├── pyproject.toml    # deusmith / deusmith-web 入口点
 └── README.md
 ```
 

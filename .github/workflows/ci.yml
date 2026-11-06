@@ -25,12 +25,15 @@ jobs:
           import deusmith
           from deusmith import (params, models, algos, embeddings, llm, store,
                                 shallow, pipeline, offline, evidence, retryhttp,
-                                rerank, console)
-          print('13 modules OK, version', deusmith.__version__)
+                                rerank, console, webconsole)
+          print('14 modules OK, version', deusmith.__version__)
           "
       - name: Console smoke (REPL commands + rerank blend/fallback)
         run: |
           python -m deusmith.console --smoke
+      - name: Web console smoke (HTTP API + page)
+        run: |
+          python -m deusmith.webconsole --smoke
       - name: End-to-end smoke (write -> retrieve -> inject)
         run: |
           python -c "

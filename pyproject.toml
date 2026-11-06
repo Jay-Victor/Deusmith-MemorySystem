@@ -17,9 +17,10 @@ dev = []
 
 [project.scripts]
 deusmith = "deusmith.console:main"
+deusmith-web = "deusmith.webconsole:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-deusmith = ["schema.sql"]
+deusmith = ["schema.sql", "web/*.html"]

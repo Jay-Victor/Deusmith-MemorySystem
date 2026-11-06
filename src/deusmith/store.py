@@ -312,6 +312,16 @@ class InMemoryStore:
                 if n.scope == scope and n.status == NodeStatus.active
                 and (tier is None or n.tier == tier)]
 
+    def list_nodes(self, scope, tier=None, status=None, limit=200) -> list[MemoryNode]:
+        """控制台列表查询：按 tier/status 过滤，updated_at 倒序。"""
+        t = Tier(tier) if tier is not None else None
+        st = NodeStatus(status) if status is not None else None
+        out = [n for n in self._nodes.values()
+               if n.scope == scope and (t is None or n.tier == t)
+               and (st is None or n.status == st)]
+        out.sort(key=lambda n: n.updated_at, reverse=True)
+        return out[:max(1, int(limit))]
+
     # ---- 日志与审计
     def log_event(self, event_type: str, payload: dict, trace_id=None, scope="") -> None:
         self._events.append({
@@ -647,6 +657,24 @@ class PostgresStore:
         if tier is not None:
             sql += " AND tier=%s"
             args.append(tier.value if hasattr(tier, "value") else str(tier))
+        with self.cursor() as cur:
+            cur.execute(sql, args)
+            rows = cur.fetchall()
+        return [_row_to_node(r) for r in rows]
+
+    def list_nodes(self, scope, tier=None, status=None, limit=200) -> list[MemoryNode]:
+        """控制台列表查询：按 tier/status 过滤，updated_at 倒序。"""
+        cols = ", ".join(_NODE_COLS)
+        sql = f"SELECT {cols} FROM memory_node WHERE scope=%s"
+        args: list = [scope]
+        if tier is not None:
+            sql += " AND tier=%s"
+            args.append(tier.value if hasattr(tier, "value") else str(tier))
+        if status is not None:
+            sql += " AND status=%s"
+            args.append(status.value if hasattr(status, "value") else str(status))
+        sql += " ORDER BY updated_at DESC LIMIT %s"
+        args.append(max(1, int(limit)))
         with self.cursor() as cur:
             cur.execute(sql, args)
             rows = cur.fetchall()

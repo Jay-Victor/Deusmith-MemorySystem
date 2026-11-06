@@ -33,6 +33,8 @@ import argparse
 import json
 import os
 import sys
+import threading
+import webbrowser
 from cmd import Cmd
 from datetime import timedelta
 
@@ -50,7 +52,7 @@ from .store import InMemoryStore
 
 COMMANDS = ("write", "search", "inject", "tiers", "node", "slot", "why",
             "explain", "stats", "forget", "govern", "session", "config",
-            "help", "quit")
+            "web", "help", "quit")
 
 _TIER_ORDER = (Tier.shallow, Tier.middle, Tier.deep)
 
@@ -384,6 +386,35 @@ class DeusmithConsole(Cmd):
               f"mmr_λ={p.score.mmr_lambda}")
         print(f"  敏感上限:   L{self.mem.allowed_sensitivity}")
 
+    # ================================================== Web 控制台
+    def do_web(self, arg: str):
+        """web [端口] —— 启动可视化控制台（后台线程，REPL 继续可用）。"""
+        if getattr(self, "_web_srv", None) is not None:
+            print("  可视化控制台已在运行")
+            return
+        from .webconsole import WebApp, make_server
+        port = 8765
+        if arg.strip():
+            try:
+                port = int(arg.strip())
+            except ValueError:
+                print("用法: web [端口]")
+                return
+        app = WebApp.from_memory(self.mem, backend_label=self.backend)
+        try:
+            srv = make_server(app, "127.0.0.1", port)
+        except OSError as exc:
+            print(f"  端口 {port} 被占用（{exc}）")
+            return
+        self._web_srv = srv
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        url = f"http://127.0.0.1:{srv.server_address[1]}/"
+        print(f"  可视化控制台已启动: {url}（Ctrl+C 退出 REPL 时一并关闭）")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+
     # ================================================== 退出
     def do_quit(self, arg: str):
         return True
@@ -537,11 +568,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--session", default="console-1", help="会话 ID")
     ap.add_argument("--memory", action="store_true", help="强制内存后端（不落 PG）")
     ap.add_argument("--smoke", action="store_true", help="自检模式（CI/回归用）")
+    ap.add_argument("--web", action="store_true",
+                    help="启动可视化 Web 控制台（代替 REPL）")
+    ap.add_argument("--port", type=int, default=8765, help="--web 端口（默认 8765）")
     ap.add_argument("cmd", nargs="*", help="一次性命令及参数（省略则进 REPL）")
     args = ap.parse_args(argv)
 
     if args.smoke:
         return smoke()
+
+    if args.web:
+        from .webconsole import main as web_main
+        wargv = ["--scope", args.scope, "--port", str(args.port)]
+        if args.config:
+            wargv += ["--config", args.config]
+        if args.memory:
+            wargv.append("--memory")
+        return web_main(wargv)
 
     try:
         cfg = load_config(args.config)

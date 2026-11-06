@@ -1,0 +1,964 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deusmith · 记忆系统可视化控制台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧠</text></svg>">
+<style>
+*{box-sizing:border-box}
+:root{
+  --bg:#0d1017;--panel:#151a23;--panel2:#1a2130;--border:#232c3d;
+  --fg:#d8deea;--muted:#8b95a7;--accent:#6ea8fe;--good:#4ade80;
+  --warn:#fbbf24;--bad:#f87171;--purple:#c4a7f5;
+}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--fg);
+  font:14px/1.65 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:10px 18px;
+  background:var(--panel);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:10;flex-wrap:wrap}
+header h1{font-size:15px;margin:0;font-weight:600;white-space:nowrap}
+header h1 span{color:var(--accent)}
+.chip{font-size:12px;color:var(--muted);background:var(--panel2);
+  border:1px solid var(--border);border-radius:12px;padding:2px 10px;
+  white-space:nowrap}
+.chip b{color:var(--fg);font-weight:500}
+header .spacer{flex:1}
+#scope-input{width:190px;padding:4px 10px;font-size:13px}
+#layout{display:flex;min-height:calc(100vh - 57px)}
+aside{width:280px;flex:none;padding:14px;display:flex;flex-direction:column;
+  gap:12px;border-right:1px solid var(--border)}
+main{flex:1;padding:14px 18px;min-width:0}
+.card{background:var(--panel);border:1px solid var(--border);
+  border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.card h3{margin:0 0 10px;font-size:12px;color:var(--muted);
+  font-weight:600;letter-spacing:.08em}
+.stat-row{display:flex;justify-content:space-between;font-size:13px;
+  padding:3px 0}
+.stat-row b{font-weight:600}
+.stat-row .warn{color:var(--warn)}
+nav#tabs{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+nav#tabs button{background:var(--panel);border:1px solid var(--border);
+  color:var(--muted);padding:7px 14px;border-radius:8px;cursor:pointer;
+  font-size:13px}
+nav#tabs button.active{color:var(--fg);border-color:var(--accent);
+  background:var(--panel2)}
+.tab{display:none}.tab.active{display:block}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{color:var(--muted);text-align:left;font-weight:500;padding:6px 8px;
+  border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid #1c2433;vertical-align:top}
+tbody tr:hover{background:var(--panel2);cursor:pointer}
+.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.badge{display:inline-block;padding:0 8px;border-radius:10px;font-size:11px;
+  line-height:18px;white-space:nowrap}
+input,select,textarea{background:#0f141d;border:1px solid var(--border);
+  color:var(--fg);border-radius:8px;padding:7px 10px;font:inherit}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent)}
+textarea{width:100%;resize:vertical}
+button{background:var(--panel2);border:1px solid var(--border);color:var(--fg);
+  border-radius:8px;padding:7px 16px;cursor:pointer;font:inherit;font-size:13px}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);
+  color:#0b1220;font-weight:600}
+button.primary:hover{filter:brightness(1.1)}
+button.ghost{background:transparent;color:var(--muted)}
+button:disabled{opacity:.5;cursor:not-allowed}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+.muted{color:var(--muted)}
+.mono{font-family:Consolas,"Courier New",monospace;font-size:12px}
+#drawer{position:fixed;top:0;right:-430px;width:410px;height:100vh;
+  background:var(--panel);border-left:1px solid var(--border);
+  transition:right .18s;overflow-y:auto;z-index:30;padding:16px 18px;
+  box-shadow:-8px 0 24px rgba(0,0,0,.35)}
+#drawer.open{right:0}
+#drawer h2{font-size:14px;margin:0 0 4px;display:flex;gap:8px;align-items:center}
+#drawer-close{position:absolute;top:10px;right:12px;background:none;
+  border:none;color:var(--muted);font-size:18px;cursor:pointer}
+.kv{display:grid;grid-template-columns:118px 1fr;gap:3px 10px;
+  font-size:12.5px;margin:8px 0}
+.kv b{color:var(--muted);font-weight:500}
+.factor{margin:5px 0}
+.factor .lbl{display:flex;justify-content:space-between;font-size:12px;
+  color:var(--muted)}
+.bar{height:6px;background:#232c3d;border-radius:3px;overflow:hidden;
+  margin-top:2px}
+.bar i{display:block;height:100%;border-radius:3px;background:var(--accent)}
+#toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+  background:var(--panel2);border:1px solid var(--accent);color:var(--fg);
+  padding:8px 18px;border-radius:8px;opacity:0;transition:opacity .2s;
+  z-index:50;font-size:13px;pointer-events:none}
+#toast.show{opacity:1}
+#toast.bad{border-color:var(--bad)}
+.seg{border-radius:8px;padding:10px 12px;font-size:13px;white-space:pre-wrap;
+  word-break:break-word;margin:6px 0;border:1px solid var(--border);
+  background:#0f141d}
+.seg .tag{font-size:11px;color:var(--muted);display:block;margin-bottom:4px}
+.empty{color:var(--muted);text-align:center;padding:26px 0;font-size:13px}
+.tierbar{margin:7px 0}
+.tierbar .lbl{display:flex;justify-content:space-between;font-size:12px;
+  color:var(--muted);margin-bottom:3px}
+.tierbar .track{display:flex;height:10px;border-radius:5px;overflow:hidden;
+  background:#232c3d}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;
+  color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:3px;
+  margin-right:4px;vertical-align:-1px}
+.ev{display:flex;gap:10px;padding:7px 4px;border-bottom:1px solid #1c2433;
+  font-size:12.5px;align-items:baseline}
+.ev time{color:var(--muted);white-space:nowrap;font-size:11.5px}
+.ev .pl{color:var(--muted);word-break:break-all;flex:1}
+.verse{padding:10px 12px;border:1px solid var(--border);border-radius:8px;
+  margin:8px 0;background:#0f141d}
+.verse .meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+  font-size:12px;color:var(--muted);margin-bottom:4px}
+.verse .win{font-family:Consolas,monospace;font-size:11.5px}
+#graph-wrap{position:relative;background:#0f141d;border:1px solid var(--border);
+  border-radius:10px;overflow:hidden}
+#graph-wrap svg{display:block;width:100%;cursor:grab}
+.gnode{cursor:pointer}
+.gnode text{fill:var(--muted);font-size:10px;pointer-events:none}
+#graph-info{padding:10px 14px;font-size:13px;border-top:1px solid var(--border);
+  min-height:44px}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.stat{background:var(--panel2);border:1px solid var(--border);border-radius:8px;
+  padding:6px 12px;font-size:12.5px}
+.stat b{font-size:15px;font-weight:600;margin-left:6px}
+.hint{font-size:12px;color:var(--muted)}
+.chart-legend{display:flex;gap:16px;font-size:12px;color:var(--muted);
+  margin-top:6px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🧠 Deusmith <span>记忆系统</span>·可视化控制台</h1>
+  <span class="chip" id="chip-backend">后端 <b>—</b></span>
+  <span class="chip" id="chip-emb">嵌入 <b>—</b></span>
+  <span class="chip" id="chip-rerank">精排 <b>—</b></span>
+  <span class="chip" id="chip-llm">LLM <b>—</b></span>
+  <span class="spacer"></span>
+  <input id="scope-input" placeholder="scope（租户/用户）">
+  <button id="btn-scope" class="ghost">切换</button>
+  <button id="btn-session-end" class="ghost" title="摘要+晋升评估+会话持久化">结束会话</button>
+</header>
+
+<div id="layout">
+<aside>
+  <div class="card">
+    <h3>概览</h3>
+    <div class="stat-row"><span class="muted">节点 / 边</span><b id="st-counts">—</b></div>
+    <div class="stat-row"><span class="muted">活跃节点</span><b id="st-active">—</b></div>
+    <div class="stat-row"><span class="muted">权重基尼</span><b id="st-gini">—</b></div>
+    <div class="stat-row"><span class="muted">敏感上限</span><b id="st-sens">—</b></div>
+  </div>
+  <div class="card">
+    <h3>三层分布</h3>
+    <div id="tier-bars"></div>
+    <div class="legend" id="tier-legend"></div>
+  </div>
+  <div class="card">
+    <h3>参数</h3>
+    <div class="stat-row"><span class="muted">τ_base</span><b id="p-tau">—</b></div>
+    <div class="stat-row"><span class="muted">RRF k</span><b id="p-rrf">—</b></div>
+    <div class="stat-row"><span class="muted">精排权重 w</span><b id="p-rw">—</b></div>
+    <div class="stat-row"><span class="muted">MMR λ</span><b id="p-mmr">—</b></div>
+    <div class="stat-row"><span class="muted">Token 预算</span><b id="p-budget">—</b></div>
+  </div>
+  <div class="card">
+    <h3>离线治理</h3>
+    <button id="btn-govern" class="primary" style="width:100%">执行一轮治理</button>
+    <p class="hint" style="margin:8px 0 0">边衰减/剪枝 → 环路消解 → 压缩合并 → 权重慢衰减 → 层级流转 → 一致性审计</p>
+    <div id="govern-mini"></div>
+  </div>
+</aside>
+
+<main>
+<nav id="tabs">
+  <button data-tab="write" class="active">写入 / 检索</button>
+  <button data-tab="browse">记忆浏览器</button>
+  <button data-tab="forget">遗忘曲线</button>
+  <button data-tab="graph">记忆图谱</button>
+  <button data-tab="slot">槽位版本链</button>
+  <button data-tab="events">事件流</button>
+</nav>
+
+<!-- ============ 写入/检索 ============ -->
+<section id="tab-write" class="tab active">
+  <div class="card">
+    <h3>写入记忆</h3>
+    <textarea id="write-text" rows="3" placeholder="例如：&#10;请记住：我对花粉过敏。&#10;我喜欢摄影，周末常去拍夜景。&#10;我现在住在北京。"></textarea>
+    <div class="row" style="margin-top:10px">
+      <label class="muted" style="font-size:12.5px">来源权威
+        <input type="range" id="write-auth" min="0" max="1" step="0.05" value="0.8"
+               style="width:130px;vertical-align:middle">
+        <output id="auth-val" class="mono">0.80</output>
+      </label>
+      <span class="spacer" style="flex:1"></span>
+      <button id="btn-write" class="primary">写入</button>
+    </div>
+    <div id="write-result"></div>
+  </div>
+  <div class="card">
+    <h3>检索 / 注入预览</h3>
+    <div class="row">
+      <input id="search-q" class="grow" placeholder="查询，如：用户的居住地和爱好"
+             style="min-width:220px">
+      <label class="muted" style="font-size:12.5px">top-k
+        <input id="search-k" type="number" value="8" min="1" max="30"
+               style="width:64px"></label>
+      <button id="btn-search" class="primary">检索</button>
+      <button id="btn-inject" class="ghost">注入预览</button>
+    </div>
+    <div id="search-info" class="hint" style="margin-top:6px"></div>
+    <div id="search-result"></div>
+    <div id="inject-result"></div>
+  </div>
+</section>
+
+<!-- ============ 记忆浏览器 ============ -->
+<section id="tab-browse" class="tab">
+  <div class="card">
+    <h3>记忆浏览器</h3>
+    <div class="row" style="margin-bottom:10px">
+      <select id="f-tier">
+        <option value="">全部层</option><option value="shallow">浅层</option>
+        <option value="middle">中层</option><option value="deep">深层</option>
+      </select>
+      <select id="f-status">
+        <option value="">全部状态</option><option value="active">active</option>
+        <option value="archived">archived</option>
+        <option value="contested">contested</option>
+        <option value="deprecated">deprecated</option>
+      </select>
+      <input id="f-q" class="grow" placeholder="内容包含…">
+      <button id="btn-filter" class="primary">筛选</button>
+    </div>
+    <div id="nodes-table-wrap"></div>
+  </div>
+</section>
+
+<!-- ============ 遗忘曲线 ============ -->
+<section id="tab-forget" class="tab">
+  <div class="card">
+    <h3>遗忘曲线 · recency = exp(−Δt / (τ_base·S))</h3>
+    <div class="row" style="margin-bottom:10px">
+      <select id="forget-node" class="grow" style="min-width:260px"></select>
+      <button id="btn-forget" class="primary">绘制</button>
+    </div>
+    <div id="forget-stats"></div>
+    <div id="forget-chart"></div>
+    <div class="chart-legend" id="forget-legend"></div>
+    <p class="hint">S = 1 + 0.8·importance + 0.5·emotion + 0.7·confidence + 0.3·ln(1+activation)。
+      归档期限 = −τ_eff·ln(θ)（θ=0.2）——重要/可信/高频访问的记忆被"拉伸"，忘得更慢。</p>
+  </div>
+</section>
+
+<!-- ============ 记忆图谱 ============ -->
+<section id="tab-graph" class="tab">
+  <div class="card">
+    <h3>记忆图谱</h3>
+    <div class="row" style="margin-bottom:10px">
+      <button id="btn-graph-reload" class="primary">重新加载</button>
+      <button id="btn-graph-layout" class="ghost">重新布局</button>
+      <span class="hint" id="graph-note"></span>
+    </div>
+    <div id="graph-wrap">
+      <div id="graph-svg-host"></div>
+      <div id="graph-info" class="muted">点击节点查看详情；拖拽调整位置。颜色=层级，大小=权重。</div>
+    </div>
+    <div class="legend" id="graph-legend"></div>
+  </div>
+</section>
+
+<!-- ============ 槽位版本链 ============ -->
+<section id="tab-slot" class="tab">
+  <div class="card">
+    <h3>槽位版本链（双时间窗口）</h3>
+    <div class="row" style="margin-bottom:10px">
+      <input id="slot-subject" value="user" placeholder="subject" style="width:140px">
+      <input id="slot-predicate" value="住在" placeholder="predicate" style="width:140px">
+      <button id="btn-slot" class="primary">查询</button>
+    </div>
+    <div id="slot-result"></div>
+  </div>
+</section>
+
+<!-- ============ 事件流 ============ -->
+<section id="tab-events" class="tab">
+  <div class="card">
+    <h3>事件流（最近 60 条）</h3>
+    <div id="events-list"></div>
+  </div>
+</section>
+</main>
+</div>
+
+<div id="drawer"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ============================ 基础 ============================ */
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+async function api(path, body){
+  const opts = body === undefined ? {} : {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(body)};
+  const r = await fetch(path, opts);
+  let j = {};
+  try { j = await r.json(); } catch(e){}
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+function toast(msg, kind){
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "show" + (kind === "bad" ? " bad" : "");
+  setTimeout(()=> t.className = "", 2800);
+}
+function relTime(iso){
+  if (!iso) return "—";
+  const d = (Date.now() - new Date(iso)) / 1000;
+  if (d < 0) return new Date(iso).toLocaleString();
+  if (d < 90)   return Math.round(d) + " 秒前";
+  if (d < 7200) return Math.round(d/60) + " 分钟前";
+  if (d < 172800) return Math.round(d/3600) + " 小时前";
+  return Math.round(d/86400) + " 天前";
+}
+const TIER_COLOR = {shallow:"#8b95a7", middle:"#6ea8fe", deep:"#fbbf24"};
+const TIER_NAME  = {shallow:"浅层", middle:"中层", deep:"深层"};
+const STATUS_COLOR = {active:"#4ade80", archived:"#5b6472", contested:"#fbbf24",
+                      deprecated:"#f87171", deleted_logical:"#f87171"};
+const EDGE_COLOR = {semantic_similar:"#5f7fd9", temporal_next:"#4ade80",
+  causal:"#c4a7f5", co_occur:"#414b5c", coref:"#7dd3fc", supports:"#4ade80",
+  contradicts:"#f87171", derives_from:"#7dd3fc", summary_of:"#c4a7f5"};
+const EV_COLOR = {write:"#6ea8fe", retrieval:"#c4a7f5", inject:"#4ade80",
+  conflict:"#f87171", duplicate_write:"#7dd3fc", session_end:"#7dd3fc",
+  offline_run:"#fbbf24", rerank_fallback:"#fbbf24", llm_fallback:"#fbbf24"};
+
+function badge(kind, map, name){
+  const c = (map || {})[kind] || "#8b95a7";
+  return '<span class="badge" style="color:'+c+';background:'+c+'22;border:1px solid '+c+'55">'
+    + esc(name || kind) + "</span>";
+}
+function shortId(id){ return (id || "").slice(-8); }
+
+/* ============================ 状态 ============================ */
+let STATE = null;
+let NODES = [];
+
+async function refreshState(){
+  try { STATE = await api("/api/state"); } catch(e){ toast(e.message,"bad"); return; }
+  renderState();
+}
+function renderState(){
+  const s = STATE; if (!s) return;
+  $("#chip-backend").innerHTML = "后端 <b>" + esc(s.backend) + "</b>";
+  $("#chip-emb").innerHTML = "嵌入 <b>" + esc(s.embedding) + "</b>";
+  $("#chip-rerank").innerHTML = "精排 <b>" + esc(s.rerank || "未启用") + "</b>";
+  $("#chip-llm").innerHTML = "LLM <b>" + esc(s.llm) + "</b>";
+  if (document.activeElement !== $("#scope-input")) $("#scope-input").value = s.scope;
+  $("#st-counts").textContent = s.counts.nodes_total + " / " + s.counts.edges_total;
+  $("#st-active").textContent = s.nodes_active;
+  const g = $("#st-gini");
+  g.textContent = s.gini.toFixed(3) + (s.gini > s.gini_alert ? " ⚠垄断" : "");
+  g.className = s.gini > s.gini_alert ? "warn" : "";
+  $("#st-sens").textContent = "L" + s.allowed_sensitivity;
+  $("#p-tau").textContent = s.params.tau_base_days + " 天";
+  $("#p-rrf").textContent = s.params.rrf_k;
+  $("#p-rw").textContent = s.params.rerank_weight;
+  $("#p-mmr").textContent = s.params.mmr_lambda;
+  $("#p-budget").textContent = s.params.token_budget;
+
+  // 三层堆叠条
+  const statuses = ["active","contested","archived","deprecated"];
+  let html = "", legend = "";
+  for (const t of ["shallow","middle","deep"]){
+    const counts = statuses.map(st => [st, s.tier_stats[t+"|"+st] || 0]);
+    const total = counts.reduce((a,[,c]) => a+c, 0);
+    const segs = counts.filter(([,c]) => c > 0).map(([st,c]) =>
+      '<i style="flex:'+c+';background:'+STATUS_COLOR[st]+'" title="'+st+': '+c+'"></i>').join("");
+    html += '<div class="tierbar"><div class="lbl"><span>'
+      + '<i style="display:inline-block;width:9px;height:9px;border-radius:3px;margin-right:5px;background:'
+      + TIER_COLOR[t]+'"></i>' + TIER_NAME[t] + '</span><span>' + total + "</span></div>"
+      + '<div class="track">' + segs + "</div></div>";
+  }
+  $("#tier-bars").innerHTML = html || '<div class="empty">暂无数据</div>';
+  legend = statuses.map(st =>
+    '<span><i style="background:'+STATUS_COLOR[st]+'"></i>'+st+"</span>").join("");
+  $("#tier-legend").innerHTML = legend;
+}
+
+/* ============================ Tabs ============================ */
+document.querySelectorAll("nav#tabs button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("nav#tabs button").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    btn.classList.add("active");
+    $("#tab-" + btn.dataset.tab).classList.add("active");
+    if (btn.dataset.tab === "forget") populateForgetSelect();
+    if (btn.dataset.tab === "graph") loadGraph();
+    if (btn.dataset.tab === "events") loadEvents();
+    if (btn.dataset.tab === "slot") loadSlot();
+  });
+});
+
+/* ============================ 写入 ============================ */
+$("#write-auth").addEventListener("input", e => {
+  $("#auth-val").textContent = Number(e.target.value).toFixed(2);
+});
+$("#btn-write").addEventListener("click", async () => {
+  const text = $("#write-text").value.trim();
+  if (!text) { toast("请输入要写入的内容", "bad"); return; }
+  const btn = $("#btn-write"); btn.disabled = true;
+  try {
+    const j = await api("/api/write",
+      {text, source_auth: Number($("#write-auth").value)});
+    const w = j.written || [];
+    $("#write-result").innerHTML = w.length
+      ? '<div class="hint" style="margin-top:8px">写入 ' + w.length + " 条："
+        + w.map(n => badge(n.tier, TIER_COLOR, TIER_NAME[n.tier]) + " "
+          + esc(n.content.slice(0, 40))).join("<br>") + "</div>"
+      : '<div class="hint" style="margin-top:8px">（未抽取到记忆条目）</div>';
+    toast("写入 " + w.length + " 条记忆");
+    $("#write-text").value = "";
+    refreshState(); loadNodes();
+  } catch(e){ toast(e.message, "bad"); }
+  btn.disabled = false;
+});
+
+/* ============================ 检索 ============================ */
+$("#btn-search").addEventListener("click", doSearch);
+$("#search-q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+
+async function doSearch(){
+  const q = $("#search-q").value.trim();
+  if (!q) { toast("请输入查询", "bad"); return; }
+  try {
+    const j = await api("/api/search",
+      {query: q, topk: Number($("#search-k").value) || 8});
+    const rr = j.rerank;
+    $("#search-info").textContent =
+      (rr && rr.used ? "精排: " + rr.model + "（pool=" + rr.pool + ", w=" + rr.weight + "）"
+       : rr && rr.error ? "精排降级: " + rr.error : "RRF 多路融合（精排未启用）")
+      + " · trace: " + (j.trace_id || "—");
+    $("#inject-result").innerHTML = "";
+    $("#search-result").innerHTML = !j.results.length
+      ? '<div class="empty">（无命中）</div>'
+      : '<table><thead><tr><th>#</th><th class="num">score</th><th class="num">rel</th>'
+        + "<th>层</th><th>状态</th><th>内容</th><th>最近访问</th></tr></thead><tbody>"
+        + j.results.map((r, i) =>
+          '<tr data-id="'+esc(r.id)+'"><td>'+(i+1)+'</td>'
+          + '<td class="num">'+r.score.toFixed(4)+"</td>"
+          + '<td class="num">'+r.rel.toFixed(3)+"</td>"
+          + "<td>"+badge(r.tier, TIER_COLOR, TIER_NAME[r.tier])+"</td>"
+          + "<td>"+badge(r.status, STATUS_COLOR)+"</td>"
+          + "<td>"+esc(r.content)+"</td>"
+          + '<td class="muted">'+relTime(r.last_access_at)+"</td></tr>").join("")
+        + "</tbody></table>"
+        + (j.conflict_flags.length
+           ? '<p class="hint">⚠ 记忆冲突（待确认）: '
+             + j.conflict_flags.map(shortId).join(", ") + "</p>" : "");
+    $("#search-result").querySelectorAll("tr[data-id]").forEach(tr =>
+      tr.addEventListener("click", () => openDrawer(tr.dataset.id)));
+  } catch(e){ toast(e.message, "bad"); }
+}
+
+$("#btn-inject").addEventListener("click", async () => {
+  const q = $("#search-q").value.trim();
+  if (!q) { toast("请输入查询", "bad"); return; }
+  try {
+    const j = await api("/api/inject", {query: q});
+    $("#inject-result").innerHTML =
+      '<h3 style="margin-top:14px">注入预览</h3>'
+      + '<div class="chips"><span class="stat">tokens<b>'+j.tokens+"</b></span>"
+      + '<span class="stat">降级<b>'+(j.degraded ? "是" : "否")+"</b></span>"
+      + '<span class="stat">冲突<b>'+j.conflict_flags.length+"</b></span></div>"
+      + '<div class="seg"><span class="tag">[system] 深层身份 / 策略</span>'
+      + esc(j.system || "（空）")+"</div>"
+      + '<div class="seg"><span class="tag">[user] 相关记忆 + 会话投影</span>'
+      + esc(j.user || "（空）")+"</div>"
+      + '<div class="seg"><span class="tag">[tool] 证据指针</span>'
+      + esc(j.tool || "（空）")+"</div>";
+  } catch(e){ toast(e.message, "bad"); }
+});
+
+/* ============================ 记忆浏览器 ============================ */
+async function loadNodes(){
+  try {
+    const p = new URLSearchParams();
+    if ($("#f-tier").value) p.set("tier", $("#f-tier").value);
+    if ($("#f-status").value) p.set("status", $("#f-status").value);
+    const qv = $("#f-q").value.trim();
+    if (qv) p.set("q", qv);
+    p.set("limit", "200");
+    const j = await api("/api/nodes?" + p);
+    NODES = j.nodes;
+    renderNodes();
+  } catch(e){ toast(e.message, "bad"); }
+}
+function renderNodes(){
+  if (!NODES.length){
+    $("#nodes-table-wrap").innerHTML = '<div class="empty">（无记忆节点——先去写入几条）</div>';
+    return;
+  }
+  $("#nodes-table-wrap").innerHTML =
+    '<table><thead><tr><th>ID</th><th>内容</th><th>层</th><th>状态</th>'
+    + '<th class="num">weight</th><th class="num">conf</th><th class="num">imp</th>'
+    + '<th class="num">激活</th><th>最近访问</th></tr></thead><tbody>'
+    + NODES.map(n =>
+      '<tr data-id="'+esc(n.id)+'"><td class="mono muted">'+shortId(n.id)+"</td>"
+      + "<td>"+esc(n.content)+"</td>"
+      + "<td>"+badge(n.tier, TIER_COLOR, TIER_NAME[n.tier])+"</td>"
+      + "<td>"+badge(n.status, STATUS_COLOR)+"</td>"
+      + '<td class="num">'+n.weight.toFixed(3)+"</td>"
+      + '<td class="num">'+n.confidence.toFixed(2)+"</td>"
+      + '<td class="num">'+n.importance.toFixed(2)+"</td>"
+      + '<td class="num">'+n.activation_count+"</td>"
+      + '<td class="muted">'+relTime(n.last_access_at)+"</td></tr>").join("")
+    + "</tbody></table>";
+  $("#nodes-table-wrap").querySelectorAll("tr[data-id]").forEach(tr =>
+    tr.addEventListener("click", () => openDrawer(tr.dataset.id)));
+}
+$("#btn-filter").addEventListener("click", loadNodes);
+$("#f-q").addEventListener("keydown", e => { if (e.key === "Enter") loadNodes(); });
+
+/* ============================ 节点详情抽屉 ============================ */
+async function openDrawer(id){
+  const d = $("#drawer");
+  d.innerHTML = '<div class="empty">加载中…</div>';
+  d.classList.add("open");
+  let j;
+  try { j = await api("/api/node/" + encodeURIComponent(id)); }
+  catch(e){ d.innerHTML = '<div class="empty">'+esc(e.message)+"</div>"; return; }
+  const n = j.node, ex = j.explain || {};
+  const f = ex.factors || {};
+  d.innerHTML =
+    '<button id="drawer-close">✕</button>'
+    + "<h2><span class='mono'>"+shortId(n.id)+"</span>"
+    + badge(n.tier, TIER_COLOR, TIER_NAME[n.tier])
+    + badge(n.status, STATUS_COLOR) + "</h2>"
+    + '<div class="seg">'+esc(n.content)+"</div>"
+    + (n.subject ? '<p class="hint">槽位: '+esc(n.subject)+" · "
+      + esc(n.predicate||"—")+" · "+esc(n.object_value||"—")
+      +"（polarity "+(n.polarity>0?"+1":n.polarity<0?"−1":"0")+"）</p>" : "")
+    + '<div class="kv">'
+    + kv("类型", n.type) + kv("创建", relTime(n.created_at))
+    + kv("最近访问", relTime(n.last_access_at))
+    + kv("生效窗口", (n.valid_from||"—") + " → " + (n.valid_to||"开放"))
+    + kv("weight / conf", n.weight.toFixed(3) + " / " + n.confidence.toFixed(3))
+    + kv("imp / emotion", n.importance.toFixed(2) + " / " + n.emotion.toFixed(2))
+    + kv("来源", esc(n.source) + "（auth " + n.source_auth.toFixed(2)
+        + "，consistency " + n.consistency.toFixed(2) + "）")
+    + kv("激活 / 跨会话", n.activation_count + " / " + n.cross_session_count)
+    + kv("敏感级 / 显式记住", "L" + n.sensitivity + " / " + (n.explicit_remember ? "是" : "否"))
+    + kv("替代 / 被争议", (n.supersedes ? shortId(n.supersedes) : "—")
+        + " / " + (n.contested_by ? shortId(n.contested_by) : "—"))
+    + kv("证据", n.evidence_refs.length ? n.evidence_refs.map(x => "ev_" + x.slice(3,11)).join(", ") : "—")
+    + kv("嵌入", esc(n.embedding_model) + " · " + n.dim + " 维")
+    + kv("会话 / 世代", esc(n.session_id||"—") + " / gen" + n.generation)
+    + "</div>"
+    + factorBar("weight", f.weight) + factorBar("recency", f.recency)
+    + factorBar("confidence", f.confidence) + factorBar("importance", f.importance)
+    + (ex.score_at_full_rel !== undefined
+       ? '<p class="hint">rel=1.0 时的上限分: <b>'+ex.score_at_full_rel+"</b></p>" : "")
+    + '<div class="row" style="margin-top:12px">'
+    + '<button id="d-forget" class="primary">遗忘曲线</button>'
+    + '<button id="d-why" class="ghost">命中历史</button>'
+    + '<button id="d-slot" class="ghost">槽位历史</button></div>'
+    + '<div id="d-extra" style="margin-top:10px"></div>';
+  $("#drawer-close").addEventListener("click", () => d.classList.remove("open"));
+  $("#d-forget").addEventListener("click", () => {
+    document.querySelector('nav#tabs button[data-tab="forget"]').click();
+    populateForgetSelect(n.id);
+  });
+  $("#d-why").addEventListener("click", async () => {
+    $("#d-extra").innerHTML = '<div class="hint">查询中…</div>';
+    try {
+      const w = await api("/api/node/" + encodeURIComponent(id) + "/why");
+      $("#d-extra").innerHTML = !w.hits.length
+        ? '<div class="hint">暂无检索命中记录</div>'
+        : w.hits.map(h => '<div class="ev"><time>'+esc(h.trace_id||"")+"</time>"
+          + '<span class="pl">score '+(h.score ?? "—")+" · "
+          + esc(h.query||"")+"</span></div>").join("");
+    } catch(e){ $("#d-extra").textContent = e.message; }
+  });
+  $("#d-slot").addEventListener("click", () => {
+    if (!n.subject || !n.predicate){ toast("该节点无槽位", "bad"); return; }
+    $("#slot-subject").value = n.subject;
+    $("#slot-predicate").value = n.predicate;
+    document.querySelector('nav#tabs button[data-tab="slot"]').click();
+  });
+}
+function kv(k, v){ return "<b>"+k+"</b><span>"+v+"</span>"; }
+function factorBar(name, v){
+  if (v === undefined || v === null) return "";
+  const pct = Math.max(0, Math.min(100, v * 100));
+  return '<div class="factor"><div class="lbl"><span>'+name
+    +"</span><span>"+Number(v).toFixed(3)+'</span></div><div class="bar"><i style="width:'
+    + pct + '%"></i></div></div>';
+}
+
+/* ============================ 遗忘曲线 ============================ */
+async function populateForgetSelect(selectId){
+  if (!NODES.length){ try { await loadNodes(); } catch(e){} }
+  const sel = $("#forget-node");
+  if (!NODES.length){
+    sel.innerHTML = '<option value="">（无节点）</option>'; return;
+  }
+  sel.innerHTML = NODES.map(n =>
+    '<option value="'+esc(n.id)+'">'+shortId(n.id)+" · "
+    + esc(n.content.slice(0, 34)) + "</option>").join("");
+  if (selectId) sel.value = selectId;
+  else if (!sel.value) sel.value = NODES[0].id;
+  drawForget();                     // 进页即绘（选中项或首节点）
+}
+$("#btn-forget").addEventListener("click", drawForget);
+
+async function drawForget(){
+  const id = $("#forget-node").value;
+  if (!id){ toast("请选择节点", "bad"); return; }
+  let j;
+  try { j = await api("/api/node/" + encodeURIComponent(id) + "/forget"); }
+  catch(e){ toast(e.message, "bad"); return; }
+  $("#forget-stats").innerHTML =
+    '<div class="chips">'
+    + '<span class="stat">S<b>'+j.S+"</b></span>"
+    + '<span class="stat">τ_eff<b>'+j.tau_days+" 天</b></span>"
+    + '<span class="stat">归档期限<b>'+j.archive_days+" 天</b></span>"
+    + '<span class="stat">距今 Δt<b>'+j.current_dt_days+" 天</b></span>"
+    + '<span class="stat">当前 recency<b>'+j.current_recency+"</b></span></div>";
+  lineChart($("#forget-chart"), {
+    series: [
+      {name:"本节点（S="+j.S+"）", color:"var(--accent)", dash:null,
+       points: j.curve.map(p => [p.days, p.recency])},
+      {name:"热参考（S="+j.refs.hot.S+"）", color:"var(--good)", dash:"4 4",
+       points: j.refs.hot.curve.map(p => [p.days, p.recency])},
+      {name:"冷参考（S="+j.refs.cold.S+"）", color:"var(--muted)", dash:"4 4",
+       points: j.refs.cold.curve.map(p => [p.days, p.recency])},
+    ],
+    xMax: 365, yMax: 1,
+    xTicks: [0,7,30,90,180,365],
+    hLine: {y: j.archive_floor, label: "θ 归档阈值 " + j.archive_floor},
+    vLine: {x: Math.min(365, j.current_dt_days), label: "当前 Δt"},
+    marker: {x: Math.min(365, j.archive_days), y: j.archive_floor,
+             label: "归档期限 " + j.archive_days + " 天"},
+  });
+  $("#forget-legend").innerHTML =
+    "横轴：距最近访问的天数；纵轴：recency。虚线为冷/热参考节点（importance/confidence/activation 不同）。";
+}
+
+function lineChart(el, cfg){
+  el.innerHTML = "";
+  const W = Math.max(320, el.clientWidth || 760), H = 300;
+  const P = {l: 46, r: 18, t: 16, b: 36};
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  const X = v => P.l + (Math.max(0, Math.min(cfg.xMax, v)) / cfg.xMax) * iw;
+  const Y = v => P.t + (1 - Math.max(0, Math.min(cfg.yMax, v)) / cfg.yMax) * ih;
+  let s = '<svg width="'+W+'" height="'+H+'" xmlns="http://www.w3.org/2000/svg">';
+  // 网格与刻度
+  for (const t of cfg.xTicks){
+    s += '<line x1="'+X(t)+'" y1="'+P.t+'" x2="'+X(t)+'" y2="'+(P.t+ih)
+      + '" stroke="#232c3d" stroke-width="1"/>'
+      + '<text x="'+X(t)+'" y="'+(H-14)+'" fill="#8b95a7" font-size="11" text-anchor="middle">'
+      + t + "</text>";
+  }
+  for (let v = 0; v <= 1.0001; v += 0.25){
+    s += '<line x1="'+P.l+'" y1="'+Y(v)+'" x2="'+(P.l+iw)+'" y2="'+Y(v)
+      + '" stroke="#232c3d" stroke-width="1"/>'
+      + '<text x="'+(P.l-8)+'" y="'+(Y(v)+4)+'" fill="#8b95a7" font-size="11" text-anchor="end">'
+      + v.toFixed(2).replace(/0+$/,"").replace(/\.$/,"") + "</text>";
+  }
+  // θ 横线
+  if (cfg.hLine){
+    s += '<line x1="'+P.l+'" y1="'+Y(cfg.hLine.y)+'" x2="'+(P.l+iw)+'" y2="'+Y(cfg.hLine.y)
+      + '" stroke="var(--warn)" stroke-width="1" stroke-dasharray="6 3"/>'
+      + '<text x="'+(P.l+iw-4)+'" y="'+(Y(cfg.hLine.y)-4)+'" fill="var(--warn)" font-size="10.5" text-anchor="end">'
+      + esc(cfg.hLine.label) + "</text>";
+  }
+  // 当前 Δt 竖线
+  if (cfg.vLine && cfg.vLine.x > 0){
+    s += '<line x1="'+X(cfg.vLine.x)+'" y1="'+P.t+'" x2="'+X(cfg.vLine.x)+'" y2="'+(P.t+ih)
+      + '" stroke="var(--purple)" stroke-width="1" stroke-dasharray="3 3"/>'
+      + '<text x="'+X(cfg.vLine.x)+'" y="'+(P.t+11)+'" fill="var(--purple)" font-size="10.5" text-anchor="middle">'
+      + esc(cfg.vLine.label) + "</text>";
+  }
+  // 曲线
+  for (const sr of cfg.series){
+    const d = sr.points.map((p, i) =>
+      (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1)).join(" ");
+    s += '<path d="'+d+'" fill="none" stroke="'+sr.color+'" stroke-width="2"'
+      + (sr.dash ? ' stroke-dasharray="'+sr.dash+'"' : "") + "/>";
+  }
+  // 归档期限标记
+  if (cfg.marker){
+    s += '<circle cx="'+X(cfg.marker.x)+'" cy="'+Y(cfg.marker.y)+'" r="4.5" fill="var(--warn)"/>'
+      + '<text x="'+(X(cfg.marker.x)+8)+'" y="'+(Y(cfg.marker.y)-8)+'" fill="var(--warn)" font-size="10.5">'
+      + esc(cfg.marker.label) + "</text>";
+  }
+  s += '<text x="'+(P.l+iw/2)+'" y="'+(H-1)+'" fill="#8b95a7" font-size="10.5" text-anchor="middle">距最近访问的天数 Δt</text>';
+  s += "</svg>";
+  el.innerHTML = s;
+}
+
+/* ============================ 记忆图谱 ============================ */
+let G = null, gSim = null;
+
+async function loadGraph(){
+  try {
+    G = await api("/api/graph");
+    $("#graph-note").textContent = G.nodes.length + " 节点 / " + G.edges.length + " 边"
+      + (G.truncated ? "（已截断至前 400 节点）" : "");
+    drawGraph();
+  } catch(e){ toast(e.message, "bad"); }
+}
+$("#btn-graph-reload").addEventListener("click", loadGraph);
+$("#btn-graph-layout").addEventListener("click", () => { if (G) drawGraph(); });
+
+function drawGraph(){
+  const host = $("#graph-svg-host");
+  host.innerHTML = "";
+  if (!G || !G.nodes.length){
+    host.innerHTML = '<div class="empty" style="padding:60px 0">（暂无节点）</div>';
+    return;
+  }
+  const W = Math.max(320, host.clientWidth || 900), H = 520;
+  const nodes = G.nodes.map(n => Object.assign({}, n));
+  const byId = {}; nodes.forEach(n => byId[n.id] = n);
+  const links = G.edges.filter(e => byId[e.src] && byId[e.dst]);
+  nodes.forEach((n, i) => {
+    const a = i / nodes.length * 2 * Math.PI;
+    n.x = W/2 + Math.cos(a) * W * 0.32;
+    n.y = H/2 + Math.sin(a) * H * 0.36;
+  });
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("width", W); svg.setAttribute("height", H);
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  host.appendChild(svg);
+  const eLayer = document.createElementNS(svgNS, "g");
+  const nLayer = document.createElementNS(svgNS, "g");
+  svg.appendChild(eLayer); svg.appendChild(nLayer);
+
+  const eEls = links.map(e => {
+    const l = document.createElementNS(svgNS, "line");
+    l.setAttribute("stroke", EDGE_COLOR[e.type] || "#414b5c");
+    l.setAttribute("stroke-width", 0.6 + e.weight * 2);
+    l.setAttribute("opacity", .55);
+    l.appendChild(document.createTextNode("")); 
+    const t = document.createElementNS(svgNS, "title");
+    t.textContent = e.type + " · w=" + e.weight;
+    l.appendChild(t);
+    eLayer.appendChild(l);
+    return l;
+  });
+  const nEls = nodes.map(n => {
+    const g = document.createElementNS(svgNS, "g");
+    g.setAttribute("class", "gnode");
+    const r = 5 + n.weight * 9;
+    const c = document.createElementNS(svgNS, "circle");
+    c.setAttribute("r", r);
+    c.setAttribute("fill", TIER_COLOR[n.tier] || "#8b95a7");
+    c.setAttribute("stroke", STATUS_COLOR[n.status] || "#8b95a7");
+    c.setAttribute("stroke-width", n.status === "contested" ? 2.5 : 1.5);
+    const t = document.createElementNS(svgNS, "title");
+    t.textContent = "[" + TIER_NAME[n.tier] + "/" + n.status + "] " + n.content
+      + "\nweight=" + n.weight;
+    g.appendChild(c); g.appendChild(t);
+    if (nodes.length <= 60){
+      const tx = document.createElementNS(svgNS, "text");
+      tx.setAttribute("text-anchor", "middle");
+      tx.setAttribute("y", r + 11);
+      tx.textContent = n.content.slice(0, 8);
+      g.appendChild(tx);
+    }
+    g.addEventListener("click", () => focusNode(n));
+    g.addEventListener("pointerdown", ev => startDrag(ev, n));
+    nLayer.appendChild(g);
+    return g;
+  });
+
+  let selected = null;
+  function focusNode(n){
+    selected = n;
+    const adj = new Set([n.id]);
+    links.forEach(e => { if (e.src === n.id) adj.add(e.dst);
+                         if (e.dst === n.id) adj.add(e.src); });
+    nodes.forEach((m, i) => nEls[i].setAttribute("opacity",
+      m.id === n.id || adj.has(m.id) ? 1 : .12));
+    links.forEach((e, i) => eEls[i].setAttribute("opacity",
+      e.src === n.id || e.dst === n.id ? .95 : .06));
+    $("#graph-info").innerHTML =
+      "<b>" + shortId(n.id) + "</b> · " + badge(n.tier, TIER_COLOR, TIER_NAME[n.tier])
+      + badge(n.status, STATUS_COLOR) + " · w=" + n.weight + " · 度="
+      + links.filter(e => e.src === n.id || e.dst === n.id).length
+      + '<div class="hint">'+esc(n.content)+"</div>";
+  }
+  let dragNode = null;
+  function startDrag(ev, n){
+    ev.preventDefault();
+    dragNode = n;
+    const move = e => {
+      if (!dragNode) return;
+      const rect = svg.getBoundingClientRect();
+      dragNode.x = e.clientX - rect.left;
+      dragNode.y = e.clientY - rect.top;
+      paint();
+    };
+    const up = () => {
+      dragNode = null;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  function paint(){
+    links.forEach((e, i) => {
+      const a = byId[e.src], b = byId[e.dst];
+      eEls[i].setAttribute("x1", a.x); eEls[i].setAttribute("y1", a.y);
+      eEls[i].setAttribute("x2", b.x); eEls[i].setAttribute("y2", b.y);
+    });
+    nodes.forEach((n, i) => nEls[i].setAttribute("transform",
+      "translate(" + n.x + "," + n.y + ")"));
+  }
+  // 力导向：斥力 + 弹簧 + 向心
+  const REP = 3200, LEN = 74, SPRING = 0.012;
+  let iter = 0, raf = 0;
+  function tick(){
+    for (let i = 0; i < nodes.length; i++){
+      for (let j = i + 1; j < nodes.length; j++){
+        const a = nodes[i], b = nodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d2 = dx*dx + dy*dy; if (d2 < 1) d2 = 1;
+        const f = REP / d2, d = Math.sqrt(d2);
+        const ux = dx/d, uy = dy/d;
+        a.x -= ux*f; a.y -= uy*f; b.x += ux*f; b.y += uy*f;
+      }
+    }
+    for (const e of links){
+      const a = byId[e.src], b = byId[e.dst];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const f = (d - LEN) * SPRING;
+      const ux = dx/d, uy = dy/d;
+      a.x += ux*f*d*0.08; a.y += uy*f*d*0.08;
+      b.x -= ux*f*d*0.08; b.y -= uy*f*d*0.08;
+    }
+    for (const n of nodes){
+      n.x += (W/2 - n.x) * 0.004; n.y += (H/2 - n.y) * 0.004;
+      n.x = Math.max(24, Math.min(W-24, n.x));
+      n.y = Math.max(24, Math.min(H-24, n.y));
+    }
+    paint();
+    if (++iter < 320 && !dragNode) raf = requestAnimationFrame(tick);
+    else if (dragNode) raf = requestAnimationFrame(tick);
+  }
+  if (gSim) cancelAnimationFrame(gSim);
+  gSim = requestAnimationFrame(tick);
+  // 图例
+  $("#graph-legend").innerHTML =
+    Object.entries(TIER_NAME).map(([t, nm]) =>
+      '<span><i style="background:'+TIER_COLOR[t]+'"></i>'+nm+"</span>").join("")
+    + '<span><i style="background:#f87171"></i>contradicts 边</span>'
+    + '<span><i style="background:#4ade80"></i>temporal 边</span>'
+    + '<span><i style="background:#5f7fd9"></i>semantic 边</span>';
+}
+
+/* ============================ 槽位版本链 ============================ */
+async function loadSlot(){
+  const subject = $("#slot-subject").value.trim() || "user";
+  const predicate = $("#slot-predicate").value.trim();
+  if (!predicate){ $("#slot-result").innerHTML = ""; return; }
+  try {
+    const j = await api("/api/slot?subject=" + encodeURIComponent(subject)
+      + "&predicate=" + encodeURIComponent(predicate));
+    const vs = j.versions || [];
+    $("#slot-result").innerHTML = !vs.length
+      ? '<div class="empty">槽位（'+esc(subject)+", "+esc(predicate)+"）无记录</div>"
+      : vs.map(v => {
+        const live = v.status === "active";
+        return '<div class="verse"><div class="meta">'
+          + badge(v.status, STATUS_COLOR)
+          + '<span class="mono">'+shortId(v.node_id)+"</span>"
+          + '<span class="win">'+esc(v.valid_from || "?")+" → "
+          + esc(v.valid_to || (live ? "至今（生效中）" : "开放"))+"</span>"
+          + (live ? '<span style="color:var(--good)">● 当前生效</span>' : "")
+          + "</div><div>"+esc(v.content)+"</div></div>";
+      }).join("");
+  } catch(e){ toast(e.message, "bad"); }
+}
+$("#btn-slot").addEventListener("click", loadSlot);
+
+/* ============================ 事件流 ============================ */
+async function loadEvents(){
+  try {
+    const j = await api("/api/events?limit=60");
+    $("#events-list").innerHTML = !j.events.length
+      ? '<div class="empty">（暂无事件）</div>'
+      : j.events.map(e =>
+        '<div class="ev"><time>'+esc((e.ts||"").replace("T"," ").slice(0,19))+"</time>"
+        + badge(e.type, EV_COLOR)
+        + '<span class="pl mono">'+esc(JSON.stringify(e.payload).slice(0, 220))
+        + "</span></div>").join("");
+  } catch(e){ toast(e.message, "bad"); }
+}
+
+/* ============================ 治理 / 会话 / scope ============================ */
+async function doGovern(){
+  const btn = $("#btn-govern"); btn.disabled = true; btn.textContent = "治理中…";
+  try {
+    const j = await api("/api/govern", {});
+    const r = j.report || {};
+    $("#govern-mini").innerHTML =
+      Object.entries(r).map(([k, v]) =>
+        '<div class="stat-row"><span class="muted">'+esc(k)+"</span><b"
+        + (k === "weight_monopoly_warning" && v ? ' class="warn"' : "") + ">"
+        + esc(String(v)) + "</b></div>").join("");
+    toast("治理完成：归档 " + (r.archived||0) + " · 摘要 " + (r.summaries_created||0)
+      + " · 晋升深层 " + (r.promoted_deep||0));
+    refreshState(); loadNodes();
+  } catch(e){ toast(e.message, "bad"); }
+  btn.disabled = false; btn.textContent = "执行一轮治理";
+}
+$("#btn-govern").addEventListener("click", doGovern);
+
+$("#btn-session-end").addEventListener("click", async () => {
+  try {
+    await api("/api/session/end", {});
+    toast("会话已结束：摘要 + 晋升评估 + 持久化");
+    refreshState();
+  } catch(e){ toast(e.message, "bad"); }
+});
+
+$("#btn-scope").addEventListener("click", async () => {
+  const s = $("#scope-input").value.trim();
+  if (!s){ toast("scope 不能为空", "bad"); return; }
+  try {
+    await api("/api/scope", {scope: s});
+    toast("已切换 scope: " + s);
+    await refreshState();
+    loadNodes();
+    $("#search-result").innerHTML = ""; $("#inject-result").innerHTML = "";
+  } catch(e){ toast(e.message, "bad"); }
+});
+$("#scope-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") $("#btn-scope").click();
+});
+
+/* ============================ 初始化 ============================ */
+(async function init(){
+  await refreshState();
+  await loadNodes();
+  populateForgetSelect();
+  setInterval(refreshState, 15000);
+})();
+</script>
+</body>
+</html>
