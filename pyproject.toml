@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deusmith-memory"
-version = "0.1.0"
+version = "0.3.2"
 description = "Deusmith-MemorySystem：类人脑分层智能体记忆管理库（PG+pgvector 后端）"
 requires-python = ">=3.11"
 dependencies = [
